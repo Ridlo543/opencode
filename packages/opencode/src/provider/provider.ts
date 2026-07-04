@@ -4,12 +4,12 @@ import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import fuzzysort from "fuzzysort"
 import { Config } from "@/config/config"
 import { mapValues, mergeDeep, omit, pickBy, sortBy } from "remeda"
-import { NoSuchModelError, type Provider as SDK } from "ai"
+import { NoSuchModelError, wrapLanguageModel, type Provider as SDK } from "ai"
 import { Npm } from "@opencode-ai/core/npm"
 import { Hash } from "@opencode-ai/core/util/hash"
 import { Plugin } from "../plugin"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
-import { type LanguageModelV3 } from "@ai-sdk/provider"
+import { type LanguageModelV3, type LanguageModelV3GenerateResult, type LanguageModelV3Middleware, type LanguageModelV3StreamPart, type LanguageModelV3StreamResult, type SharedV3Warning } from "@ai-sdk/provider"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { Auth } from "../auth"
 import { Env } from "../env"
@@ -33,6 +33,104 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
+
+function streamPartsToGenerateResult(parts: LanguageModelV3StreamPart[]): LanguageModelV3GenerateResult {
+  const warnings: Array<SharedV3Warning> = []
+  const textChunks: Array<{ id: string; texts: string[] }> = []
+  const reasoningChunks: Array<{ id: string; texts: string[] }> = []
+  const toolInputChunks: Array<{ id: string; toolName: string; texts: string[] }> = []
+  const contents: Array<LanguageModelV3GenerateResult["content"][number]> = []
+
+  let finishReason: { unified: "stop" | "length" | "content-filter" | "tool-calls" | "error" | "other"; raw: string | undefined } = { unified: "stop", raw: undefined }
+  let usage: { inputTokens: { total: number | undefined; noCache: number | undefined; cacheRead: number | undefined; cacheWrite: number | undefined }; outputTokens: { total: number | undefined; text: number | undefined; reasoning: number | undefined } } = {
+    inputTokens: { total: undefined, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+    outputTokens: { total: undefined, text: undefined, reasoning: undefined },
+  }
+  let responseId: string | undefined
+  let responseTimestamp: Date | undefined
+  let responseModelId: string | undefined
+
+  for (const part of parts) {
+    switch (part.type) {
+      case "stream-start":
+        warnings.push(...part.warnings)
+        break
+      case "text-start":
+        textChunks.push({ id: part.id, texts: [] })
+        break
+      case "text-delta": {
+        const chunk = textChunks.find((c) => c.id === part.id)
+        if (chunk) chunk.texts.push(part.delta)
+        break
+      }
+      case "text-end":
+        break
+      case "reasoning-start":
+        reasoningChunks.push({ id: part.id, texts: [] })
+        break
+      case "reasoning-delta": {
+        const chunk = reasoningChunks.find((c) => c.id === part.id)
+        if (chunk) chunk.texts.push(part.delta)
+        break
+      }
+      case "reasoning-end":
+        break
+      case "tool-input-start":
+        toolInputChunks.push({ id: part.id, toolName: part.toolName, texts: [] })
+        break
+      case "tool-input-delta": {
+        const chunk = toolInputChunks.find((c) => c.id === part.id)
+        if (chunk) chunk.texts.push(part.delta)
+        break
+      }
+      case "tool-input-end": {
+        const chunk = toolInputChunks.find((c) => c.id === part.id)
+        if (chunk) {
+          contents.push({
+            type: "tool-call",
+            toolCallId: chunk.id,
+            toolName: chunk.toolName,
+            input: chunk.texts.join(""),
+          })
+        }
+        break
+      }
+      case "response-metadata": {
+        const { type: _type, ...meta } = part
+        responseId = meta.id
+        responseTimestamp = meta.timestamp
+        responseModelId = meta.modelId
+        break
+      }
+      case "finish":
+        finishReason = part.finishReason
+        usage = part.usage
+        break
+      case "tool-call":
+      case "tool-result":
+      case "file":
+      case "source":
+      case "tool-approval-request":
+        contents.push(part)
+        break
+    }
+  }
+
+  for (const chunk of textChunks) {
+    contents.push({ type: "text", text: chunk.texts.join("") })
+  }
+  for (const chunk of reasoningChunks) {
+    contents.push({ type: "reasoning", text: chunk.texts.join("") })
+  }
+
+  return {
+    content: contents,
+    finishReason,
+    usage,
+    warnings,
+    response: { id: responseId, timestamp: responseTimestamp, modelId: responseModelId },
+  } as LanguageModelV3GenerateResult
+}
 
 function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   if (typeof ms !== "number" || ms <= 0) return res
@@ -1837,7 +1935,7 @@ const layer = Layer.effect(
       return yield* EffectPromise.refineRejection(
         async () => {
           const sdk = await resolveSDK(model, s, envs)
-          const language = s.modelLoaders[model.providerID]
+          let language = s.modelLoaders[model.providerID]
             ? await s.modelLoaders[model.providerID](
                 sdk,
                 model.api.id,
@@ -1848,6 +1946,39 @@ const layer = Layer.effect(
                 model,
               )
             : sdk.languageModel(model.api.id)
+
+          const forceStreaming = (model.options?.["forceStreaming"] ?? provider?.options?.["forceStreaming"]) === true
+          if (forceStreaming) {
+            language = wrapLanguageModel({
+              model: language,
+              middleware: [
+                {
+                  specificationVersion: "v3",
+                  async wrapGenerate({ doStream, params, model }: { doStream: () => PromiseLike<LanguageModelV3StreamResult>; params: any; model: LanguageModelV3 }) {
+                    const { responseFormat: _, ...cleanParams } = params
+                    const streamResult = await model.doStream(cleanParams)
+                    const parts: LanguageModelV3StreamPart[] = []
+                    const reader = streamResult.stream.getReader()
+                    while (true) {
+                      const { done, value } = await reader.read()
+                      if (done) break
+                      parts.push(value)
+                    }
+                    const result = streamPartsToGenerateResult(parts)
+                    return {
+                      ...result,
+                      request: streamResult.request,
+                      response: { ...result.response, headers: streamResult.response?.headers },
+                    }
+                  },
+                  wrapStream({ doStream }: { doStream: () => PromiseLike<LanguageModelV3StreamResult> }) {
+                    return doStream()
+                  },
+                } satisfies LanguageModelV3Middleware,
+              ],
+            })
+          }
+
           s.models.set(key, language)
           return language
         },

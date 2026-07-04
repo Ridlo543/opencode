@@ -6,10 +6,10 @@ import { ProviderTransform } from "@/provider/transform"
 import type { MessageV2 } from "./message-v2"
 
 const COMPACTION_BUFFER = 20_000
+const DEFAULT_CONTEXT_LIMIT = 131_072
 
 export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
-  const context = input.model.limit.context
-  if (context === 0) return 0
+  const context = input.model.limit.context || DEFAULT_CONTEXT_LIMIT
 
   const reserved =
     input.cfg.compaction?.reserved ??
@@ -26,7 +26,6 @@ export function isOverflow(input: {
   outputTokenMax?: number
 }) {
   if (input.cfg.compaction?.auto === false) return false
-  if (input.model.limit.context === 0) return false
 
   const count =
     input.tokens.total || input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write

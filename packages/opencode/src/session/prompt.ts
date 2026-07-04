@@ -238,14 +238,28 @@ const layer = Layer.effect(
           Stream.filter(LLMEvent.is.textDelta),
           Stream.map((e) => e.text),
           Stream.mkString,
-          Effect.orDie,
+          Effect.catch(() => Effect.succeed("")),
         )
       const cleaned = text
         .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
         .split("\n")
         .map((line) => line.trim())
         .find((line) => line.length > 0)
-      if (!cleaned) return
+      if (!cleaned) {
+        const fallbackText = firstUser.parts
+          .filter((p): p is SessionV1.TextPart => p.type === "text" && !p.synthetic)
+          .map((p) => p.text)
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim()
+        const fallback = fallbackText.length > 60 ? fallbackText.slice(0, 57) + "..." : fallbackText
+        if (fallback) {
+          yield* sessions
+            .setTitle({ sessionID: input.session.id, title: fallback })
+            .pipe(Effect.catchCause((cause) => Effect.logError("failed to set fallback title", { error: Cause.squash(cause) })))
+        }
+        return
+      }
       const t = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
       yield* sessions
         .setTitle({ sessionID: input.session.id, title: t })
