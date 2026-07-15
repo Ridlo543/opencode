@@ -2,9 +2,11 @@ export * as FileSystemSearch from "./search"
 
 import { makeLocationNode } from "../effect/app-node"
 import path from "path"
-import { Context, Effect, Layer, Scope } from "effect"
+import { Context, Effect, Layer, Scope, Stream } from "effect"
+import { FileSystemWatcher } from "@opencode-ai/schema/filesystem-watcher"
 import { Fff } from "#fff"
 import fuzzysort from "fuzzysort"
+import { EventV2 } from "../event"
 import { FileSystem } from "../filesystem"
 import { FSUtil } from "../fs-util"
 import { Location } from "../location"
@@ -46,6 +48,31 @@ export const ripgrepLayer = Layer.effect(
           }),
       })
       .pipe(Effect.orDie, Effect.asVoid, Effect.forkIn(scope))
+    const events = yield* EventV2.Service
+    yield* events.subscribe(FileSystemWatcher.Event.Updated).pipe(
+      Stream.filter((event) => event.data.event === "add" || event.data.event === "unlink"),
+      Stream.runForEach((event) =>
+        Effect.sync(() => {
+          const absolutePath = event.data.file.replaceAll("\\", "/")
+          const relativePath = path.relative(location.directory, absolutePath).replaceAll("\\", "/")
+          if (!relativePath || relativePath.startsWith("..")) return
+          if (event.data.event === "add") {
+            if (!state.files.includes(relativePath)) {
+              state.files.push(relativePath)
+              const parts = relativePath.split("/")
+              parts.slice(0, -1).forEach((_, index) =>
+                directories.add(parts.slice(0, index + 1).join("/") + path.sep),
+              )
+              state.directories = Array.from(directories)
+            }
+          } else {
+            const idx = state.files.indexOf(relativePath)
+            if (idx >= 0) state.files.splice(idx, 1)
+          }
+        }),
+      ),
+      Effect.forkIn(scope),
+    )
     return Service.of({
       glob: (input) =>
         Effect.gen(function* () {
@@ -236,4 +263,4 @@ const layer = Layer.unwrap(Effect.sync(() => (Flag.OPENCODE_DISABLE_FFF || !Fff.
 
 export const locationLayer = layer
 
-export const node = makeLocationNode({ service: Service, layer, deps: [FSUtil.node, Location.node, Ripgrep.node] })
+export const node = makeLocationNode({ service: Service, layer, deps: [FSUtil.node, Location.node, Ripgrep.node, EventV2.node] })
