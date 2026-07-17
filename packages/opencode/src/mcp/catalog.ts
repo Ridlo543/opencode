@@ -39,11 +39,17 @@ export function defs(client: Client, timeout?: number) {
   return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))
 }
 
+const TRANSPORT_PARAMS = new Set(["args_path", "args_offset", "args_length"])
+
 export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: number): Tool {
+  const raw = mcpTool.inputSchema
   const inputSchema: JSONSchema7 = {
-    ...(mcpTool.inputSchema as JSONSchema7),
+    ...(raw as JSONSchema7),
     type: "object",
-    properties: (mcpTool.inputSchema.properties ?? {}) as JSONSchema7["properties"],
+    properties: Object.fromEntries(
+      Object.entries(raw.properties ?? {}).filter(([k]) => !TRANSPORT_PARAMS.has(k)),
+    ) as JSONSchema7["properties"],
+    required: raw.required?.filter((k) => !TRANSPORT_PARAMS.has(k)),
     additionalProperties: false,
   }
 
