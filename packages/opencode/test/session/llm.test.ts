@@ -744,14 +744,107 @@ function createEventStream(chunks: unknown[], includeDone = false) {
   })
 }
 
-function createEventResponse(chunks: unknown[], includeDone = false) {
-  return new Response(createEventStream(chunks, includeDone), {
+function createEventResponse(chunks: unknown[], includeDone = false, fragmentSize?: number) {
+  const source = createEventStream(chunks, includeDone)
+  const body = fragmentSize
+    ? source.pipeThrough(
+        new TransformStream<Uint8Array, Uint8Array>({
+          transform(chunk, controller) {
+            for (let index = 0; index < chunk.length; index += fragmentSize) {
+              controller.enqueue(chunk.slice(index, index + fragmentSize))
+            }
+          },
+        }),
+      )
+    : source
+  return new Response(body, {
     status: 200,
     headers: { "Content-Type": "text/event-stream" },
   })
 }
 
 describe("session.llm.stream", () => {
+  it.instance(
+    "ignores AgentRouter null SSE events",
+    () =>
+      Effect.gen(function* () {
+        const request = waitRequest(
+          "/chat/completions",
+          createEventResponse(
+            [
+              {
+                id: "chatcmpl-agentrouter",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { role: "assistant" } }],
+              },
+              {
+                id: "chatcmpl-agentrouter",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { content: "Hello" } }],
+              },
+              null,
+              {
+                id: "chatcmpl-agentrouter",
+                object: "chat.completion.chunk",
+                choices: [{ delta: {}, finish_reason: "stop" }],
+              },
+            ],
+            true,
+            3,
+          ),
+        )
+        const resolved = yield* Provider.use.getModel(
+          ProviderV2.ID.make("agentrouter"),
+          ModelV2.ID.make("claude-opus-4-8"),
+        )
+        const sessionID = SessionID.make("session-test-agentrouter-null")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        yield* drain({
+          user: {
+            id: MessageID.make("msg_user-agentrouter-null"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make("agentrouter"), modelID: resolved.id },
+          } satisfies SessionV1.User,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [{ role: "user", content: "Hello" }],
+          tools: {},
+        })
+
+        const capture = yield* Effect.promise(() => request)
+        expect(capture.body.model).toBe("claude-opus-4-8")
+      }),
+    {
+      config: () => ({
+        enabled_providers: ["agentrouter"],
+        provider: {
+          agentrouter: {
+            name: "AgentRouter",
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
+            models: {
+              "claude-opus-4-8": {
+                name: "Claude Opus 4.8",
+                limit: { context: 200_000, output: 32_000 },
+              },
+            },
+          },
+        },
+      }),
+    },
+  )
+
   const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
   it.instance(
     "sends temperature, tokens, and reasoning options for openai-compatible models",

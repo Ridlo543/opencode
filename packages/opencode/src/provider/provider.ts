@@ -180,6 +180,47 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   })
 }
 
+function filterNullSSE(res: Response) {
+  if (!res.body) return res
+  if (!res.headers.get("content-type")?.includes("text/event-stream")) return res
+
+  const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
+  let buffer = ""
+  const isNullEvent = (event: string) =>
+    event
+      .split(/\r\n|\r|\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n")
+      .trim() === "null"
+  const body = res.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        buffer += decoder.decode(chunk, { stream: true })
+        while (true) {
+          const boundary = /\r\n\r\n|\r\r|\n\n/.exec(buffer)
+          if (!boundary) return
+          const end = boundary.index + boundary[0].length
+          const event = buffer.slice(0, boundary.index)
+          buffer = buffer.slice(end)
+          if (!isNullEvent(event)) controller.enqueue(encoder.encode(event + boundary[0]))
+        }
+      },
+      flush(controller) {
+        buffer += decoder.decode()
+        if (buffer && !isNullEvent(buffer)) controller.enqueue(encoder.encode(buffer))
+      },
+    }),
+  )
+
+  return new Response(body, {
+    headers: new Headers(res.headers),
+    status: res.status,
+    statusText: res.statusText,
+  })
+}
+
 function timeoutController(ms: number) {
   const ctl = new AbortController()
   const id = setTimeout(() => ctl.abort(new ProviderError.HeaderTimeoutError(ms)), ms)
@@ -1856,8 +1897,10 @@ const layer = Layer.effect(
             timeout: false,
           }).finally(() => headerTimeoutCtl?.clear())
 
-          if (!chunkAbortCtl) return res
-          return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+          // AgentRouter emits non-standard `data: null` events that the AI SDK rejects before OpenCode sees the stream.
+          const compatible = model.providerID === "agentrouter" ? filterNullSSE(res) : res
+          if (!chunkAbortCtl) return compatible
+          return wrapSSE(compatible, chunkTimeout, chunkAbortCtl)
         }
 
         const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]
