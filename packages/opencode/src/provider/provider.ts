@@ -1994,10 +1994,12 @@ const layer = Layer.effect(
           // binary garbage that the AI SDK's SSE parser cannot read. Providers
           // routed through Sleev (detected by sleeve-base-url header) must send
           // uncompressed responses, so force Accept-Encoding: identity.
-          if (model.headers?.["sleeve-base-url"] && opts.headers) {
+          if (opts.headers) {
             const h = opts.headers instanceof Headers ? opts.headers : new Headers(opts.headers as HeadersInit)
-            h.set("Accept-Encoding", "identity")
-            opts.headers = h
+            if (h.get("sleeve-base-url") || h.get("Sleeve-Base-Url")) {
+              h.set("Accept-Encoding", "identity")
+              opts.headers = h
+            }
           }
 
           const res = await fetchFn(input, {
