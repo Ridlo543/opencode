@@ -1990,6 +1990,16 @@ const layer = Layer.effect(
             opts.headers = h
           }
 
+          // Sleev compresses responses when it sees Accept-Encoding, producing
+          // binary garbage that the AI SDK's SSE parser cannot read. Providers
+          // routed through Sleev (detected by sleeve-base-url header) must send
+          // uncompressed responses, so force Accept-Encoding: identity.
+          if (model.headers?.["sleeve-base-url"] && opts.headers) {
+            const h = opts.headers instanceof Headers ? opts.headers : new Headers(opts.headers as HeadersInit)
+            h.set("Accept-Encoding", "identity")
+            opts.headers = h
+          }
+
           const res = await fetchFn(input, {
             ...opts,
             // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
