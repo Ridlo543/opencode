@@ -226,6 +226,65 @@ it.instance(
 )
 
 it.instance(
+  "custom provider discovers models from an OpenAI-compatible endpoint",
+  Effect.gen(function* () {
+    let authorization = ""
+    let discoveryHeader = ""
+    using server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        authorization = request.headers.get("authorization") ?? ""
+        discoveryHeader = request.headers.get("x-discovery") ?? ""
+        return Response.json({
+          data: [
+            {
+              id: "remote/model",
+              capabilities: {
+                tools: true,
+                reasoning: true,
+                vision: true,
+                contextWindow: 200_000,
+                maxOutput: 32_000,
+              },
+            },
+            { id: "manual/model", capabilities: { contextWindow: 1, maxOutput: 1 } },
+            { object: "model" },
+          ],
+        })
+      },
+    })
+    yield* setProcessEnv("TEST_DISCOVERY_URL", `${server.url}v1/models`)
+
+    const providers = yield* list
+    const provider = providers[ProviderV2.ID.make("discoverable")]
+    expect(provider.models["remote/model"]).toMatchObject({
+      name: "remote/model",
+      limit: { context: 200_000, output: 32_000 },
+      capabilities: { reasoning: true, attachment: true, toolcall: true },
+    })
+    expect(provider.models["manual/model"].name).toBe("Manual Model")
+    expect(provider.models["manual/model"].limit.context).toBe(128_000)
+    expect(authorization).toBe("Bearer discovery-key")
+    expect(discoveryHeader).toBe("custom")
+  }),
+  {
+    config: {
+      provider: {
+        discoverable: {
+          name: "Discoverable",
+          npm: "@ai-sdk/openai-compatible",
+          modelDiscovery: { url: "{env:TEST_DISCOVERY_URL}", headers: { "x-discovery": "custom" } },
+          options: { apiKey: "discovery-key" },
+          models: {
+            "manual/model": { name: "Manual Model", limit: { context: 128_000, output: 4096 } },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "filters alpha provider models by default",
   Effect.gen(function* () {
     const providers = yield* list

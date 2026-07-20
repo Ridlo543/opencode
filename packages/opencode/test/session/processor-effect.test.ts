@@ -658,6 +658,53 @@ it.live("session.processor effect tests publish retry status updates", () =>
   ),
 )
 
+it.live("session.processor effect tests stop child sessions after bounded retries", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        yield* llm.error(503, { error: "boom" })
+        yield* llm.error(503, { error: "boom" })
+        yield* llm.error(503, { error: "boom" })
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "retry subagent")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          parentSessionID: "parent-session",
+          agent: { ...agent(), mode: "all" },
+          system: [],
+          messages: [{ role: "user", content: "retry subagent" }],
+          tools: {},
+        })
+
+        expect(value).toBe("stop")
+        expect(yield* llm.calls).toBe(3)
+        expect(handle.message.error?.name).toBe("APIError")
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+  10_000,
+)
+
 it.live("session.processor effect tests compact on structured context overflow", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>

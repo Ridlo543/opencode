@@ -210,6 +210,10 @@ export const TaskTool = Tool.define(
           agent: next.name,
           parts,
         })
+        if (result.info.role === "assistant" && result.info.error) {
+          const message = "message" in result.info.error.data ? result.info.error.data.message : undefined
+          return yield* Effect.fail(new Error(typeof message === "string" ? message : "Subagent failed"))
+        }
         return result.parts.findLast((item) => item.type === "text")?.text ?? ""
       })
 

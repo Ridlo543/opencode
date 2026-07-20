@@ -79,6 +79,16 @@ export const Info = Schema.Struct({
   env: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
   id: Schema.optional(Schema.String),
   npm: Schema.optional(Schema.String),
+  modelDiscovery: Schema.optional(
+    Schema.Union([
+      Schema.Boolean,
+      Schema.Struct({
+        url: Schema.optional(Schema.String),
+        headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+        timeout: Schema.optional(PositiveInt),
+      }),
+    ]),
+  ),
   whitelist: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
   blacklist: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
   options: Schema.optional(

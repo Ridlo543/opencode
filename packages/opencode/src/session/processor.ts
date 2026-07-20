@@ -27,6 +27,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
+const SUBAGENT_RETRY_LIMIT = 2
 export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
@@ -661,6 +662,7 @@ const layer = Layer.effect(
               SessionRetry.policy({
                 provider: input.model.providerID,
                 parse,
+                maxRetries: streamInput.parentSessionID ? SUBAGENT_RETRY_LIMIT : undefined,
                 set: (info) => {
                   return status.set(ctx.sessionID, {
                     type: "retry",

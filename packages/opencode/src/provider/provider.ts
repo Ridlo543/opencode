@@ -1423,6 +1423,56 @@ export function fromModelsDevProvider(provider: ModelsDev.Provider): Info {
   }
 }
 
+function discoveredModel(input: {
+  id: string
+  providerID: ProviderV2.ID
+  provider: NonNullable<ConfigV1.Info["provider"]>[string]
+  raw: Record<string, unknown>
+}) {
+  const capabilities = isRecord(input.raw.capabilities) ? input.raw.capabilities : {}
+  const context = typeof capabilities.contextWindow === "number" ? capabilities.contextWindow : 0
+  const output = typeof capabilities.maxOutput === "number" ? capabilities.maxOutput : 0
+  const vision = capabilities.vision === true
+  const pdf = capabilities.pdf === true
+  const audioInput = capabilities.audioInput === true
+  const videoInput = capabilities.videoInput === true
+  const imageOutput = capabilities.imageOutput === true
+  const audioOutput = capabilities.audioOutput === true
+  const model: Model = {
+    id: ModelV2.ID.make(input.id),
+    providerID: input.providerID,
+    name: typeof input.raw.name === "string" ? input.raw.name : input.id,
+    family: "",
+    api: {
+      id: input.id,
+      url: input.provider.api ?? "",
+      npm: input.provider.npm ?? "@ai-sdk/openai-compatible",
+    },
+    status: "active",
+    headers: {},
+    options: {},
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: { context, output },
+    capabilities: {
+      temperature: false,
+      reasoning: capabilities.reasoning === true,
+      attachment: vision || pdf || audioInput || videoInput,
+      toolcall: capabilities.tools !== false,
+      input: { text: true, audio: audioInput, image: vision, video: videoInput, pdf },
+      output: { text: true, audio: audioOutput, image: imageOutput, video: false, pdf: false },
+      interleaved:
+        (input.provider.npm ?? "@ai-sdk/openai-compatible") === "@ai-sdk/openai-compatible" &&
+        input.id.includes("deepseek")
+          ? { field: "reasoning_content" }
+          : false,
+    },
+    release_date: "",
+    variants: {},
+  }
+  model.variants = mapValues(ProviderTransform.variants(model), (variant) => variant)
+  return model
+}
+
 function modeOptions(model: Model, body: Record<string, unknown> | undefined) {
   if (!body) return model.options
   const options = Object.fromEntries(
@@ -1728,6 +1778,46 @@ const layer = Layer.effect(
           mergeProvider(providerID, partial)
         }
 
+        for (const [id, provider] of configProviders) {
+          const providerID = ProviderV2.ID.make(id)
+          if (!provider.modelDiscovery || !providers[providerID]) continue
+          const options = providers[providerID].options
+          const discovery = provider.modelDiscovery === true ? {} : provider.modelDiscovery
+          const baseURL = typeof options.baseURL === "string" ? options.baseURL.replace(/\/$/, "") : undefined
+          const url = discovery.url ?? (baseURL ? `${baseURL}/models` : undefined)
+          if (!url) continue
+
+          yield* Effect.promise(async () => {
+            try {
+              const headers = new Headers(
+                isRecord(options.headers)
+                  ? Object.fromEntries(
+                      Object.entries(options.headers).filter((entry): entry is [string, string] =>
+                        typeof entry[1] === "string",
+                      ),
+                    )
+                  : {},
+              )
+              for (const [key, value] of Object.entries(discovery.headers ?? {})) headers.set(key, value)
+              const apiKey = typeof options.apiKey === "string" ? options.apiKey : providers[providerID].key
+              if (apiKey && !headers.has("authorization")) headers.set("authorization", `Bearer ${apiKey}`)
+
+              const response = await fetch(url, {
+                headers,
+                signal: AbortSignal.timeout(discovery.timeout ?? 5_000),
+              })
+              if (!response.ok) return
+              const body: unknown = await response.json()
+              if (!isRecord(body) || !Array.isArray(body.data)) return
+
+              for (const raw of body.data) {
+                if (!isRecord(raw) || typeof raw.id !== "string" || providers[providerID].models[raw.id]) continue
+                providers[providerID].models[raw.id] = discoveredModel({ id: raw.id, providerID, provider, raw })
+              }
+            } catch {}
+          })
+        }
+
         const gitlab = ProviderV2.ID.make("gitlab")
         if (discoveryLoaders[gitlab] && providers[gitlab] && isProviderAllowed(gitlab)) {
           yield* Effect.promise(async () => {
@@ -1890,6 +1980,15 @@ const layer = Layer.effect(
 
           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
           if (combined) opts.signal = combined
+
+          // AgentRouter requires exact User-Agent "opencode/1.0". The SDK appends
+          // its own suffix (e.g. "ai-sdk/openai-compatible/2.0.41") which can cause
+          // rejections when routed through Sleev. Force the exact value here.
+          if (model.providerID === "agentrouter" && opts.headers) {
+            const h = new Headers(opts.headers as HeadersInit)
+            h.set("User-Agent", "opencode/1.0")
+            opts.headers = h
+          }
 
           const res = await fetchFn(input, {
             ...opts,

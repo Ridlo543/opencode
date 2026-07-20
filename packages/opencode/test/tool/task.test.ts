@@ -138,6 +138,13 @@ function reply(input: SessionPrompt.PromptInput, text: string): SessionV1.WithPa
   }
 }
 
+function failedReply(input: SessionPrompt.PromptInput, message: string): SessionV1.WithParts {
+  const result = reply(input, "")
+  if (result.info.role !== "assistant") return result
+  result.info.error = new SessionV1.APIError({ message, isRetryable: true }).toObject()
+  return result
+}
+
 describe("tool.task", () => {
   it.instance(
     "description sorts subagents by name and is stable across calls",
@@ -252,6 +259,44 @@ describe("tool.task", () => {
       expect(result.output).toContain(`<task id="${child.id}" state="completed">`)
       expect(seen?.sessionID).toBe(child.id)
       expect(seen?.variant).toBe("xhigh")
+    }),
+  )
+
+  it.instance("execute reports child assistant errors as task failures", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const promptOps: TaskPromptOps = {
+        ...stubOps(),
+        prompt: (input) => Effect.succeed(failedReply(input, "Provider unavailable after retries")),
+      }
+
+      const exit = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      const child = (yield* jobs.list())[0]
+      expect(child?.status).toBe("error")
+      expect(child?.error).toContain("Provider unavailable after retries")
     }),
   )
 
