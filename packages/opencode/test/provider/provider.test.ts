@@ -1536,7 +1536,7 @@ test("models.dev normalization fills required response fields", () => {
   expect(model.release_date).toBe("")
 })
 
-test("models.dev reasoning options replace generated variants and unsupported options fall back", () => {
+test("models.dev reasoning options replace generated variants and unsupported toggles fall back", () => {
   const provider = {
     id: "reasoning",
     name: "Reasoning",
@@ -1573,6 +1573,14 @@ test("models.dev reasoning options replace generated variants and unsupported op
         limit: { context: 128_000, output: 64_000 },
         experimental: { modes: { fast: {} } },
       },
+      anthropicCompatible: {
+        id: "k3",
+        name: "Anthropic Compatible",
+        reasoning: true,
+        reasoning_options: [{ type: "effort", values: ["max"] }],
+        provider: { npm: "@ai-sdk/anthropic" },
+        limit: { context: 1_048_576, output: 131_072 },
+      },
     },
   } as unknown as ModelsDev.Provider
 
@@ -1589,6 +1597,7 @@ test("models.dev reasoning options replace generated variants and unsupported op
   expect(models.override.variants).toEqual({
     high: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } },
   })
+  expect(models.anthropicCompatible.variants).toEqual({ max: { effort: "max" } })
   expect(models["gemini-3-pro-fast"].variants).toEqual(models.override.variants)
 })
 

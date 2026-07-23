@@ -32,7 +32,7 @@ import { ModelStatus } from "./model-status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
 
-const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
+const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
 
 function streamPartsToGenerateResult(parts: LanguageModelV3StreamPart[]): LanguageModelV3GenerateResult {
   const warnings: Array<SharedV3Warning> = []
