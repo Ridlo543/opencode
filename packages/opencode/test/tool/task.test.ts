@@ -354,6 +354,7 @@ describe("tool.task", () => {
       expect(prompts).toHaveLength(2)
       expect(prompts[1]?.tools).toEqual({ "*": false })
       expect(prompts[1]?.format?.type).toBe("json_schema")
+      expect(prompts[1]?.format).toBeInstanceOf(SessionV1.OutputFormatJsonSchema)
       expect(result.output).toContain("STATUS: complete")
       expect(result.output).toContain("CHANGES: updated migration")
       expect((yield* sessions.get(result.metadata.sessionId)).permission).not.toContainEqual({

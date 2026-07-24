@@ -335,13 +335,14 @@ export const TaskTool = Tool.define(
             variant: (modelOverride || next.model) ? undefined : variant,
             agent: next.name,
             tools: { "*": false },
-            format: { type: "json_schema", schema, retryCount: 1 },
+            format: new SessionV1.OutputFormatJsonSchema({ type: "json_schema", schema, retryCount: 1 }),
             parts: [
               {
                 type: "text",
                 text: [
                   "Return the final Orchestra handoff now based only on work and validation already completed.",
                   "Do not inspect, edit, or run commands. Use the required structured output exactly once.",
+                  "Do not claim success for incomplete or unvalidated work; choose the role's blocked or failed status and state what remains.",
                   `The previous response was incomplete. Preserve this evidence in the appropriate field:\n${output || "(no text response)"}`,
                 ].join("\n\n"),
               },
