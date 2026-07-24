@@ -20,6 +20,7 @@ import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Provider } from "@/provider/provider"
 import { disposeAllInstances } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -51,6 +52,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       Database.node,
       RuntimeFlags.node,
       Ripgrep.node,
+      Provider.node,
     ]),
     [[RuntimeFlags.node, RuntimeFlags.layer(flags)]],
   )
@@ -90,6 +92,35 @@ const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
     modelID: ref.modelID,
     providerID: ref.providerID,
     variant: "xhigh",
+    time: { created: Date.now() },
+  }
+  yield* session.updateMessage(assistant)
+  return { chat, assistant }
+})
+
+const seedAgent = Effect.fn("TaskToolTest.seedAgent")(function* (agent: string) {
+  const session = yield* Session.Service
+  const chat = yield* session.create({ title: `Agent ${agent}`, agent })
+  const user = yield* session.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID: chat.id,
+    agent,
+    model: ref,
+    time: { created: Date.now() },
+  })
+  const assistant: SessionV1.Assistant = {
+    id: MessageID.ascending(),
+    role: "assistant",
+    parentID: user.id,
+    sessionID: chat.id,
+    mode: agent,
+    agent,
+    cost: 0,
+    path: { cwd: "/tmp", root: "/tmp" },
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    modelID: ref.modelID,
+    providerID: ref.providerID,
     time: { created: Date.now() },
   }
   yield* session.updateMessage(assistant)
@@ -138,6 +169,12 @@ function reply(input: SessionPrompt.PromptInput, text: string): SessionV1.WithPa
   }
 }
 
+function structuredReply(input: SessionPrompt.PromptInput, structured: Record<string, unknown>): SessionV1.WithParts {
+  const result = reply(input, "")
+  if (result.info.role === "assistant") result.info.structured = structured
+  return result
+}
+
 function failedReply(input: SessionPrompt.PromptInput, message: string): SessionV1.WithParts {
   const result = reply(input, "")
   if (result.info.role !== "assistant") return result
@@ -146,6 +183,395 @@ function failedReply(input: SessionPrompt.PromptInput, message: string): Session
 }
 
 describe("tool.task", () => {
+  it.instance("uses the configured orchestra role model instead of the parent model", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+
+      yield* def.execute(
+        {
+          description: "implement scoped change",
+          prompt: "implement the requested change",
+          subagent_type: "orchestra-implementer",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "orchestra",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: stubOps({
+              onPrompt: (input) => (seen = input),
+              text: "STATUS: complete\nCHANGES: none\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review",
+            }),
+          },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(seen?.agent).toBe("orchestra-implementer")
+      expect(seen?.model?.providerID as string).toBe("9router")
+      expect(seen?.model?.modelID as string).toBe("ag/gemini-3-flash-agent")
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": {
+            mode: "subagent",
+            model: "9router/ag/gemini-3-flash-agent",
+          },
+        },
+      },
+    },
+  )
+
+  it.instance("rejects model overrides from the orchestra Lead", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const exit = yield* def
+        .execute(
+          {
+            description: "override specialist",
+            prompt: "implement the requested change",
+            subagent_type: "orchestra-implementer",
+            model: "test/other-model",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "orchestra",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance("converts an invalid orchestra handoff to a blocked result", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const result = yield* def.execute(
+        {
+          description: "review scoped change",
+          prompt: "review the requested change",
+          subagent_type: "orchestra-reviewer",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "orchestra",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({ text: "The reviewer stopped after reading the diff." }) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.output).toContain('state="completed"')
+      expect(result.output).toContain("STATUS: blocked")
+      expect(result.output).toContain("The reviewer stopped after reading the diff.")
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-reviewer": {
+            mode: "subagent",
+          },
+        },
+      },
+    },
+  )
+
+  it.instance("repairs an empty orchestra handoff with one structured turn", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const sessions = yield* Session.Service
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const prompts: SessionPrompt.PromptInput[] = []
+
+      const result = yield* def.execute(
+        {
+          description: "implement scoped change",
+          prompt: "implement the requested change",
+          subagent_type: "orchestra-implementer",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "orchestra",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: {
+              ...stubOps(),
+              prompt: (input) => {
+                prompts.push(input)
+                if (prompts.length === 1) return Effect.succeed(reply(input, ""))
+                return Effect.succeed(
+                  structuredReply(input, {
+                    status: "complete",
+                    changes: "updated migration",
+                    validation: "db:migrate passed",
+                    risks: "none",
+                    next_action: "review",
+                  }),
+                )
+              },
+            } satisfies TaskPromptOps,
+          },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(prompts).toHaveLength(2)
+      expect(prompts[1]?.tools).toEqual({ "*": false })
+      expect(prompts[1]?.format?.type).toBe("json_schema")
+      expect(result.output).toContain("STATUS: complete")
+      expect(result.output).toContain("CHANGES: updated migration")
+      expect((yield* sessions.get(result.metadata.sessionId)).permission).not.toContainEqual({
+        permission: "*",
+        pattern: "*",
+        action: "deny",
+      })
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance("repairs reviewer and tester handoffs with their role-specific fields", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      for (const testCase of [
+        {
+          role: "orchestra-reviewer",
+          structured: {
+            status: "approved",
+            findings: "none",
+            validation: "targeted tests passed",
+            risks: "none",
+            next_action: "test",
+          },
+          field: "FINDINGS: none",
+        },
+        {
+          role: "orchestra-tester",
+          structured: {
+            status: "passed",
+            changes: "none",
+            validation: "suite passed",
+            failures: "none",
+            next_action: "complete",
+          },
+          field: "FAILURES: none",
+        },
+      ]) {
+        let prompts = 0
+        const result = yield* def.execute(
+          {
+            description: "finish specialist handoff",
+            prompt: "perform the scoped work",
+            subagent_type: testCase.role,
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "orchestra",
+            abort: new AbortController().signal,
+            extra: {
+              promptOps: {
+                ...stubOps(),
+                prompt: (input) => {
+                  prompts++
+                  if (prompts === 1) return Effect.succeed(reply(input, ""))
+                  return Effect.succeed(structuredReply(input, testCase.structured))
+                },
+              } satisfies TaskPromptOps,
+            },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(prompts).toBe(2)
+        expect(result.output).toContain(testCase.field)
+      }
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-reviewer": { mode: "subagent" },
+          "orchestra-tester": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance("returns blocked when native handoff repair also fails", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let prompts = 0
+
+      const result = yield* def.execute(
+        {
+          description: "review scoped change",
+          prompt: "review the requested change",
+          subagent_type: "orchestra-reviewer",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "orchestra",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: {
+              ...stubOps(),
+              prompt: (input) => {
+                prompts++
+                if (prompts === 1) return Effect.succeed(reply(input, ""))
+                return Effect.succeed(failedReply(input, "structured output unavailable"))
+              },
+            } satisfies TaskPromptOps,
+          },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(prompts).toBe(2)
+      expect(result.output).toContain('state="completed"')
+      expect(result.output).toContain("STATUS: blocked")
+      expect(result.output).toContain("REASON: invalid_handoff")
+      expect(result.output).toContain("structured output unavailable")
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-reviewer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance("returns blocked when native handoff repair throws", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let prompts = 0
+
+      const result = yield* def.execute(
+        {
+          description: "test scoped change",
+          prompt: "test the requested change",
+          subagent_type: "orchestra-tester",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "orchestra",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: {
+              ...stubOps(),
+              prompt: (input) => {
+                prompts++
+                if (prompts === 1) return Effect.succeed(reply(input, ""))
+                return Effect.die(new Error("provider unavailable"))
+              },
+            } satisfies TaskPromptOps,
+          },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(prompts).toBe(2)
+      expect(result.output).toContain("STATUS: blocked")
+      expect(result.output).toContain("provider unavailable")
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-tester": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance("rejects generic delegation from the orchestra Lead", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const exit = yield* def
+        .execute(
+          {
+            description: "invalid delegation",
+            prompt: "do work",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "orchestra",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+    }),
+  )
+
   it.instance(
     "description sorts subagents by name and is stable across calls",
     () =>
@@ -788,6 +1214,82 @@ describe("tool.task", () => {
       expect(notification.parts[0]?.type).toBe("text")
       if (notification.parts[0]?.type === "text") expect(notification.parts[0].text).toContain("second done")
     }),
+  )
+
+  background.instance("keeps an orchestra role reserved until its continuation finishes", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const first = defer<void>()
+      const second = defer<void>()
+      let prompts = 0
+      const promptOps: TaskPromptOps = {
+        ...stubOps(),
+        prompt: (input) => {
+          prompts++
+          const handoff = reply(
+            input,
+            "STATUS: blocked\nCHANGES: none\nVALIDATION: blocked\nRISKS: none\nNEXT_ACTION: continue",
+          )
+          if (prompts === 1) return Effect.promise(() => first.promise).pipe(Effect.as(handoff))
+          return Effect.promise(() => second.promise).pipe(Effect.as(handoff))
+        },
+      }
+      const context = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "orchestra",
+        abort: new AbortController().signal,
+        extra: { promptOps },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      const started = yield* def.execute(
+        {
+          description: "implement change",
+          prompt: "implement the requested change",
+          subagent_type: "orchestra-implementer",
+          background: true,
+        },
+        context,
+      )
+      yield* def.execute(
+        {
+          description: "finish handoff",
+          prompt: "stop exploring and return the handoff",
+          subagent_type: "orchestra-implementer",
+          task_id: started.metadata.sessionId,
+        },
+        context,
+      )
+      first.resolve()
+
+      const duplicate = yield* def
+        .execute(
+          {
+            description: "duplicate implementation",
+            prompt: "implement another change",
+            subagent_type: "orchestra-implementer",
+            background: true,
+          },
+          context,
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(duplicate)).toBe(true)
+      second.resolve()
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": { mode: "subagent" },
+        },
+      },
+    },
   )
 
   background.instance("background tasks complete through the background job service", () =>

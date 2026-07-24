@@ -10,10 +10,22 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
-import { Effect, Exit, Schema, Scope } from "effect"
+import { Provider } from "@/provider/provider"
+import { Cause, Effect, Exit, Schema, Scope, SynchronizedRef } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+// [CUSTOM] Model override support
+import {
+  resolveFinalModel,
+  orchestraConcurrencyError,
+  normalizeOrchestraRoleOutput,
+  orchestraHandoffSchema,
+  renderOrchestraHandoff,
+  resolveModelOverride,
+  validateOrchestraRoleOutput,
+  type ModelOverride,
+} from "./model-override"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -49,6 +61,10 @@ const BaseParameterFields = {
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
+  model: Schema.optional(Schema.String).annotate({
+    description:
+      "Optional one-off model override for the subagent in provider/model format (e.g. 'anthropic/claude-sonnet-4', 'openai/gpt-5'). Prefer the subagent_type's configured model for stable role workflows. If omitted, the configured agent model or parent session model is used.",
+  }),
 }
 
 const BaseParameters = Schema.Struct(BaseParameterFields)
@@ -88,6 +104,39 @@ export const TaskTool = Tool.define(
     const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
+    const provider = yield* Provider.Service
+    const orchestraSlots = yield* SynchronizedRef.make(new Map<string, Record<string, number>>())
+
+    const reserveOrchestraSlot = Effect.fn("TaskTool.reserveOrchestraSlot")(function* (parentID: SessionID, role: string) {
+      const error = yield* SynchronizedRef.modify(orchestraSlots, (slots) => {
+        const counts = slots.get(parentID) ?? {}
+        const failure = orchestraConcurrencyError(counts, role)
+        if (failure) return [failure, slots] as const
+        return [
+          undefined,
+          new Map(slots).set(parentID, { ...counts, [role]: (counts[role] ?? 0) + 1 }),
+        ] as const
+      })
+      if (error) return yield* Effect.fail(new Error(error))
+    })
+
+    const releaseOrchestraSlot = Effect.fn("TaskTool.releaseOrchestraSlot")(function* (
+      parentID: SessionID,
+      role: string,
+    ) {
+      yield* SynchronizedRef.update(orchestraSlots, (slots) => {
+        const counts = slots.get(parentID)
+        if (!counts) return slots
+        const nextCount = (counts[role] ?? 0) - 1
+        const next = { ...counts }
+        if (nextCount > 0) next[role] = nextCount
+        else delete next[role]
+        const updated = new Map(slots)
+        if (Object.keys(next).length === 0) updated.delete(parentID)
+        else updated.set(parentID, next)
+        return updated
+      })
+    })
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -102,6 +151,16 @@ export const TaskTool = Tool.define(
       }
 
       const parent = yield* sessions.get(ctx.sessionID)
+      if (
+        parent.agent === "orchestra" &&
+        !["orchestra-implementer", "orchestra-reviewer", "orchestra-tester"].includes(params.subagent_type)
+      ) {
+        return yield* Effect.fail(
+          new Error(
+            `The orchestra Lead must delegate using orchestra-implementer, orchestra-reviewer, or orchestra-tester; received ${params.subagent_type}.`,
+          ),
+        )
+      }
       let current = parent
       let depth = 0
       while (current.parentID) {
@@ -133,9 +192,45 @@ export const TaskTool = Tool.define(
         return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
       }
 
+      // [CUSTOM] Model override support
+      let modelOverride: ModelOverride | undefined
+      if (params.model) {
+        if (parent.agent === "orchestra") {
+          return yield* Effect.fail(
+            new Error("The orchestra Lead cannot override specialist models; configure each role agent model instead."),
+          )
+        }
+        const result = yield* resolveModelOverride(params.model, provider)
+        if (!result.success) {
+          return yield* Effect.fail(new Error(result.error))
+        }
+        modelOverride = result.model
+
+        // Permission check for model override
+        if (!ctx.extra?.bypassAgentCheck) {
+          yield* ctx.ask({
+            permission: "model_override",
+            patterns: [params.model],
+            always: ["*"],
+            metadata: {
+              description: params.description,
+              subagent_type: params.subagent_type,
+              model: params.model,
+            },
+          })
+        }
+      }
+
       const session = params.task_id
         ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
+      if (session && (session.parentID !== ctx.sessionID || (session.agent !== undefined && session.agent !== next.name))) {
+        return yield* Effect.fail(
+          new Error(
+            `Cannot resume task ${session.id}: it belongs to a different parent session or role (${session.agent ?? "unknown"}).`,
+          ),
+        )
+      }
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
         subagent: next,
@@ -170,6 +265,8 @@ export const TaskTool = Tool.define(
             ),
           ],
         }))
+      const existingJob = yield* background.get(nextSession.id)
+      const isRunningContinuation = existingJob?.status === "running"
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
         Effect.provideService(Database.Service, database),
@@ -178,10 +275,11 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
+      // [CUSTOM] Resolve final model with fallback chain.
+      const model = resolveFinalModel(modelOverride, next.model, {
         providerID: msg.info.providerID,
-      }
+        modelID: msg.info.modelID,
+      })
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
@@ -206,7 +304,8 @@ export const TaskTool = Tool.define(
             modelID: model.modelID,
             providerID: model.providerID,
           },
-          variant: next.model ? undefined : variant,
+          // [CUSTOM] Discard variant when model override is set
+          variant: (modelOverride || next.model) ? undefined : variant,
           agent: next.name,
           parts,
         })
@@ -214,7 +313,63 @@ export const TaskTool = Tool.define(
           const message = "message" in result.info.error.data ? result.info.error.data.message : undefined
           return yield* Effect.fail(new Error(typeof message === "string" ? message : "Subagent failed"))
         }
-        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        // Providers can split a specialist's final response across multiple
+        // text parts around tool calls. Validate the complete text transcript,
+        // not only the last fragment.
+        const output = result.parts
+          .filter((item): item is Extract<typeof item, { type: "text" }> => item.type === "text")
+          .map((item) => item.text)
+          .join("\n")
+        const schema = orchestraHandoffSchema(next.name)
+        if (!schema || !validateOrchestraRoleOutput(next.name, output)) return output
+
+        const originalPermission = nextSession.permission ?? []
+        const repair = yield* ops
+          .prompt({
+            messageID: MessageID.ascending(),
+            sessionID: nextSession.id,
+            model: {
+              modelID: model.modelID,
+              providerID: model.providerID,
+            },
+            variant: (modelOverride || next.model) ? undefined : variant,
+            agent: next.name,
+            tools: { "*": false },
+            format: { type: "json_schema", schema, retryCount: 1 },
+            parts: [
+              {
+                type: "text",
+                text: [
+                  "Return the final Orchestra handoff now based only on work and validation already completed.",
+                  "Do not inspect, edit, or run commands. Use the required structured output exactly once.",
+                  `The previous response was incomplete. Preserve this evidence in the appropriate field:\n${output || "(no text response)"}`,
+                ].join("\n\n"),
+              },
+            ],
+          })
+          .pipe(
+            Effect.exit,
+            Effect.ensuring(sessions.setPermission({ sessionID: nextSession.id, permission: originalPermission })),
+          )
+        if (Exit.isSuccess(repair) && repair.value.info.role === "assistant" && !repair.value.info.error) {
+          const rendered = renderOrchestraHandoff(next.name, repair.value.info.structured)
+          if (rendered) return rendered
+        }
+
+        const repairError =
+          Exit.isFailure(repair)
+            ? String(Cause.squash(repair.cause))
+            : repair.value.info.role === "assistant" &&
+                repair.value.info.error &&
+                "message" in repair.value.info.error.data
+              ? repair.value.info.error.data.message
+              : undefined
+        return normalizeOrchestraRoleOutput(
+          next.name,
+          [output, repairError ? `Native handoff repair failed: ${repairError}` : "Native handoff repair returned no output."]
+            .filter(Boolean)
+            .join("\n"),
+        )
       })
 
       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (
@@ -274,6 +429,9 @@ export const TaskTool = Tool.define(
         }
       }
 
+      const reserved = parent.agent === "orchestra"
+      if (reserved) yield* reserveOrchestraSlot(ctx.sessionID, next.name)
+
       const info = yield* background.start({
         id: nextSession.id,
         type: id,
@@ -288,6 +446,13 @@ export const TaskTool = Tool.define(
         ]),
         run: runTask().pipe(Effect.onInterrupt(() => ops.cancel(nextSession.id))),
       })
+      if (reserved)
+        yield* background
+          .wait({ id: nextSession.id })
+          .pipe(
+            Effect.ensuring(releaseOrchestraSlot(ctx.sessionID, next.name)),
+            Effect.forkIn(scope, { startImmediately: true }),
+          )
 
       function backgroundResult() {
         return {
