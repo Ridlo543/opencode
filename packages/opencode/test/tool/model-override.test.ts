@@ -117,6 +117,142 @@ describe("validateOrchestraRoleOutput", () => {
     expect(normalizeOrchestraRoleOutput("orchestra-implementer", output)).toBe(output)
   })
 
+  it("accepts long-form implementer reports with design invariants and tests run", () => {
+    const output = [
+      "STATUS: complete",
+      "SUMMARY: Audited the existing materialization implementation and corrected fail-closed mapping defects.",
+      "FILES_CHANGED:",
+      "- migrations/00059_curriculum_intake_edition_materialization.sql",
+      "- internal/domain/curriculum/materialization/service.go",
+      "DESIGN_INVARIANTS:",
+      "- Materialization remains draft, non-serving, and non-RAG.",
+      "- Unsupported content fails closed.",
+      "TESTS_RUN:",
+      "- go test ./... -count=1",
+      "- pnpm db:vet",
+      "- git diff --check",
+      "RISKS: none identified",
+      "NEXT_ACTION: Lead should review the scoped uncommitted diff.",
+    ].join("\n")
+
+    expect(validateOrchestraRoleOutput("orchestra-implementer", output)).toBeUndefined()
+    expect(normalizeOrchestraRoleOutput("orchestra-implementer", output)).toBe(output)
+  })
+
+  it("accepts bounded validation aliases for every Orchestra role", () => {
+    for (const heading of [
+      "VALIDATION",
+      "TESTS",
+      "TESTS_RUN",
+      "TEST_RESULTS",
+      "TESTING",
+      "CHECKS",
+      "CHECKS_RUN",
+      "CHECK_RESULTS",
+      "COMMANDS_RUN",
+      "VERIFICATION",
+      "VERIFICATION_RESULTS",
+      "VALIDATION_RESULTS",
+    ]) {
+      expect(
+        validateOrchestraRoleOutput(
+          "orchestra-implementer",
+          `STATUS: complete\nCHANGES: changed src/a.ts\n${heading}: passed\nRISKS: none\nNEXT_ACTION: review`,
+        ),
+      ).toBeUndefined()
+      expect(
+        validateOrchestraRoleOutput(
+          "orchestra-reviewer",
+          `STATUS: approved\nFINDINGS: none\n${heading}: passed\nRISKS: none\nNEXT_ACTION: test`,
+        ),
+      ).toBeUndefined()
+      expect(
+        validateOrchestraRoleOutput(
+          "orchestra-tester",
+          `STATUS: passed\nCHANGES: none\n${heading}: passed\nFAILURES: none\nNEXT_ACTION: complete`,
+        ),
+      ).toBeUndefined()
+    }
+  })
+
+  it("accepts common semantic heading families across Orchestra roles", () => {
+    const implementerChanges = [
+      "CHANGES",
+      "FILES_CHANGED",
+      "CHANGED_FILES",
+      "FILES_MODIFIED",
+      "MODIFIED_FILES",
+      "IMPLEMENTATION",
+      "IMPLEMENTATION_SUMMARY",
+      "MODIFICATIONS",
+      "WORK_COMPLETED",
+    ]
+    const risks = ["RISKS", "KNOWN_RISKS", "REMAINING_RISKS", "RESIDUAL_RISKS"]
+    const nextActions = ["NEXT_ACTION", "NEXT_ACTIONS", "NEXT_STEP", "NEXT_STEPS", "FOLLOW_UP", "FOLLOW_UP_ACTIONS"]
+    const findings = ["FINDINGS", "ISSUES", "ISSUES_FOUND", "REVIEW_FINDINGS", "REVIEW_RESULTS"]
+    const failures = ["FAILURES", "FAILED_TESTS", "FAILING_TESTS", "TEST_FAILURES", "TEST_ISSUES"]
+
+    for (const heading of implementerChanges) {
+      expect(
+        validateOrchestraRoleOutput(
+          "orchestra-implementer",
+          `STATUS: complete\n${heading}: changed src/a.ts\nVALIDATION: passed\nRISKS: none\nNEXT_ACTION: review`,
+        ),
+      ).toBeUndefined()
+    }
+    for (const heading of risks) {
+      expect(
+        validateOrchestraRoleOutput(
+          "orchestra-reviewer",
+          `STATUS: approved\nFINDINGS: none\nVALIDATION: passed\n${heading}: none\nNEXT_ACTION: test`,
+        ),
+      ).toBeUndefined()
+    }
+    for (const heading of nextActions) {
+      expect(
+        validateOrchestraRoleOutput(
+          "orchestra-tester",
+          `STATUS: passed\nCHANGES: none\nVALIDATION: passed\nFAILURES: none\n${heading}: complete`,
+        ),
+      ).toBeUndefined()
+    }
+    for (const heading of findings) {
+      expect(
+        validateOrchestraRoleOutput(
+          "orchestra-reviewer",
+          `STATUS: approved\n${heading}: none\nVALIDATION: passed\nRISKS: none\nNEXT_ACTION: test`,
+        ),
+      ).toBeUndefined()
+    }
+    for (const heading of failures) {
+      expect(
+        validateOrchestraRoleOutput(
+          "orchestra-tester",
+          `STATUS: passed\nCHANGES: none\nVALIDATION: passed\n${heading}: none\nNEXT_ACTION: complete`,
+        ),
+      ).toBeUndefined()
+    }
+    for (const heading of [...implementerChanges, "TEST_CHANGES", "TESTS_ADDED"]) {
+      expect(
+        validateOrchestraRoleOutput(
+          "orchestra-tester",
+          `STATUS: passed\n${heading}: tests updated\nVALIDATION: passed\nFAILURES: none\nNEXT_ACTION: complete`,
+        ),
+      ).toBeUndefined()
+    }
+  })
+
+  it("does not fuzzy-match unsupported lookalike headings", () => {
+    for (const heading of ["FILE", "CHANGELOG", "TEST_PLAN", "RISKY", "NEXT", "OBSERVATIONS", "ERRORS"]) {
+      expect(
+        validateOrchestraRoleOutput(
+          "orchestra-implementer",
+          `STATUS: complete\n${heading}: some text\nVALIDATION: passed\nRISKS: none\nNEXT_ACTION: review`,
+        ),
+      ).toContain("CHANGES")
+    }
+  })
+
   it("accepts bounded aliases, Markdown headings, and field order variations", () => {
     expect(
       validateOrchestraRoleOutput(

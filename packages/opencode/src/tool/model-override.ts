@@ -64,35 +64,65 @@ export const ORCHESTRA_MAX_CONCURRENT_TASKS = 4
 
 export type OrchestraTaskCounts = Partial<Record<OrchestraRole, number>>
 
+const handoffAliases = {
+  CHANGES: [
+    "FILES_CHANGED",
+    "CHANGED_FILES",
+    "FILES_MODIFIED",
+    "MODIFIED_FILES",
+    "IMPLEMENTATION",
+    "IMPLEMENTATION_SUMMARY",
+    "MODIFICATIONS",
+    "WORK_COMPLETED",
+  ],
+  VALIDATION: [
+    "TESTS",
+    "TESTS_RUN",
+    "TEST_RESULTS",
+    "TESTING",
+    "CHECKS",
+    "CHECKS_RUN",
+    "CHECK_RESULTS",
+    "COMMANDS_RUN",
+    "VERIFICATION",
+    "VERIFICATION_RESULTS",
+    "VALIDATION_RESULTS",
+  ],
+  RISKS: ["KNOWN_RISKS", "REMAINING_RISKS", "RESIDUAL_RISKS"],
+  NEXT_ACTION: ["NEXT_ACTIONS", "NEXT_STEP", "NEXT_STEPS", "FOLLOW_UP", "FOLLOW_UP_ACTIONS"],
+  FINDINGS: ["ISSUES", "ISSUES_FOUND", "REVIEW_FINDINGS", "REVIEW_RESULTS"],
+  FAILURES: ["FAILED_TESTS", "FAILING_TESTS", "TEST_FAILURES", "TEST_ISSUES"],
+} as const
+
 const orchestraContracts = {
   "orchestra-implementer": {
     statuses: ["complete", "blocked"],
     fields: ["CHANGES", "VALIDATION", "RISKS", "NEXT_ACTION"],
     aliases: {
-      CHANGES: ["FILES_CHANGED", "IMPLEMENTATION", "MODIFICATIONS"],
-      VALIDATION: ["TESTS", "CHECKS"],
-      RISKS: ["REMAINING_RISKS"],
-      NEXT_ACTION: ["NEXT_STEPS"],
+      CHANGES: handoffAliases.CHANGES,
+      VALIDATION: handoffAliases.VALIDATION,
+      RISKS: handoffAliases.RISKS,
+      NEXT_ACTION: handoffAliases.NEXT_ACTION,
     },
   },
   "orchestra-reviewer": {
     statuses: ["approved", "needs_revision", "blocked"],
     fields: ["FINDINGS", "VALIDATION", "RISKS", "NEXT_ACTION"],
     aliases: {
-      FINDINGS: ["REVIEW_FINDINGS", "ISSUES"],
-      VALIDATION: ["TESTS", "CHECKS"],
-      RISKS: ["REMAINING_RISKS"],
-      NEXT_ACTION: ["NEXT_STEPS"],
+      FINDINGS: handoffAliases.FINDINGS,
+      VALIDATION: handoffAliases.VALIDATION,
+      RISKS: handoffAliases.RISKS,
+      NEXT_ACTION: handoffAliases.NEXT_ACTION,
     },
   },
   "orchestra-tester": {
     statuses: ["passed", "failed", "blocked"],
     fields: ["CHANGES", "VALIDATION", "FAILURES", "NEXT_ACTION"],
     aliases: {
-      CHANGES: ["FILES_CHANGED", "TEST_CHANGES"],
-      VALIDATION: ["TESTS", "CHECKS"],
-      FAILURES: ["TEST_FAILURES", "FAILING_TESTS"],
-      NEXT_ACTION: ["NEXT_STEPS"],
+      CHANGES: [...handoffAliases.CHANGES, "TEST_CHANGES", "TESTS_ADDED"],
+      VALIDATION: handoffAliases.VALIDATION,
+      FAILURES: handoffAliases.FAILURES,
+      NEXT_ACTION: handoffAliases.NEXT_ACTION,
     },
   },
 } satisfies Record<
