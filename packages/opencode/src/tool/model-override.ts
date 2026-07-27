@@ -141,7 +141,9 @@ function normalizeHandoffHeading(value: string) {
 
 function parseHandoffSections(output: string, canonical: Map<string, string>) {
   const sections = new Map<string, string[]>()
+  const structural = new Map<string, string[]>()
   let current: string | undefined
+  let currentStructural: string | undefined
   let fence: string | undefined
   for (const line of output.split(/\r?\n/)) {
     const fenceMatch = line.match(/^\s*(```+|~~~+)/)
@@ -157,22 +159,34 @@ function parseHandoffSections(output: string, canonical: Map<string, string>) {
     const markdownHeading = /^\s*#{1,6}\s+/.test(line)
     const bullet = /^\s*[-*+]\s+/.test(line)
     const explicit = line.includes(":") || markdownHeading
+    const protocolHeading = rawHeading === rawHeading.toUpperCase()
+    const structuralHeading = explicit && (markdownHeading || (!bullet && protocolHeading))
     if (match && field && explicit) {
       current = field
+      currentStructural = heading
       const value = match[2]?.trim()
       // Canonical and alias duplicates are one section; the final declaration wins.
       sections.set(field, value ? [value] : [])
+      structural.set(heading, value ? [value] : [])
+      continue
+    }
+    if (match && structuralHeading) {
+      current = undefined
+      currentStructural = heading
+      const value = match[2]?.trim()
+      structural.set(heading, value ? [value] : [])
       continue
     }
     // An explicit unknown heading must not become content for the preceding field.
-    const protocolHeading = rawHeading === rawHeading.toUpperCase()
     if (match && (markdownHeading || (line.includes(":") && !bullet && protocolHeading))) {
       current = undefined
+      currentStructural = undefined
       continue
     }
     if (current && line.trim()) sections.get(current)?.push(line.trim())
+    if (currentStructural && line.trim()) structural.get(currentStructural)?.push(line.trim())
   }
-  return sections
+  return { canonical: sections, structural }
 }
 
 function finalHandoffStatus(output: string) {
@@ -210,6 +224,29 @@ function hasMeaningfulHandoffValue(lines: string[] | undefined) {
   return !/^(?:<\s*(?:text|value|todo)\s*>|\.{2,}|tbd|todo)$/i.test(value)
 }
 
+const supplementaryHandoffSections = new Set([
+  "SUMMARY",
+  "NOTES",
+  "SCOPE",
+  "CONTEXT",
+  "DESIGN_INVARIANTS",
+  "ASSUMPTIONS",
+  "DETAILS",
+])
+
+function hasStructuralHandoff(sections: Map<string, string[]>) {
+  const evidence = [...sections.entries()].filter(
+    ([heading, lines]) => !supplementaryHandoffSections.has(heading) && hasMeaningfulHandoffValue(lines),
+  )
+  if (evidence.length < 4) return false
+  const content = evidence
+    .flatMap(([, lines]) => lines)
+    .join("\n")
+    .replace(/^\s*[-*+]\s*/gm, "")
+    .trim()
+  return content.length >= 40
+}
+
 export function orchestraConcurrencyError(counts: OrchestraTaskCounts, role: string): string | undefined {
   if (!isOrchestraRole(role)) return undefined
 
@@ -243,8 +280,12 @@ export function validateOrchestraRoleOutput(role: string, output: string): strin
   // SUMMARY is useful context but deliberately not a substitute for role evidence.
   canonical.set("SUMMARY", "SUMMARY")
   const sections = parseHandoffSections(handoff, canonical)
-  const complete = contract.fields.every((field) => hasMeaningfulHandoffValue(sections.get(field)))
-  if (status && contract.statuses.includes(status) && complete) return undefined
+  const complete = contract.fields.every((field) => hasMeaningfulHandoffValue(sections.canonical.get(field)))
+  const canonicalConsistent = contract.fields
+    .filter((field) => sections.canonical.has(field))
+    .every((field) => hasMeaningfulHandoffValue(sections.canonical.get(field)))
+  const structural = canonicalConsistent && hasStructuralHandoff(sections.structural)
+  if (status && contract.statuses.includes(status) && (complete || structural)) return undefined
 
   return `${role} must return a complete handoff with STATUS (${contract.statuses.join(", ")}) and fields ${contract.fields.join(", ")}.`
 }

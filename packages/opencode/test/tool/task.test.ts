@@ -491,6 +491,60 @@ describe("tool.task", () => {
     },
   )
 
+  it.instance("accepts structurally complete novel handoff headings without repair", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const prompts: SessionPrompt.PromptInput[] = []
+      const output = [
+        "STATUS: complete",
+        "DELIVERED_WORK: Implemented the requested scoped behavior and preserved unrelated worktree changes.",
+        "PROOF_OF_CHECKS: Ran targeted tests, typecheck, and diff validation successfully.",
+        "UNRESOLVED_ITEMS: No blocking concern remains after validation of the scoped implementation.",
+        "ROUTING_DECISION: Lead should inspect the scoped diff and continue to independent review.",
+      ].join("\n")
+
+      const result = yield* def.execute(
+        {
+          description: "implement scoped behavior",
+          prompt: "implement the requested scoped behavior",
+          subagent_type: "orchestra-implementer",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "orchestra",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: {
+              ...stubOps(),
+              prompt: (input) => {
+                prompts.push(input)
+                return Effect.succeed(reply(input, output))
+              },
+            } satisfies TaskPromptOps,
+          },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(prompts).toHaveLength(1)
+      expect(result.output).toContain("DELIVERED_WORK:")
+      expect(result.output).not.toContain("invalid_handoff")
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
   it.instance("repairs reviewer and tester handoffs with their role-specific fields", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seedAgent("orchestra")

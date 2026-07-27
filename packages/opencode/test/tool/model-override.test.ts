@@ -242,15 +242,65 @@ describe("validateOrchestraRoleOutput", () => {
     }
   })
 
-  it("does not fuzzy-match unsupported lookalike headings", () => {
-    for (const heading of ["FILE", "CHANGELOG", "TEST_PLAN", "RISKY", "NEXT", "OBSERVATIONS", "ERRORS"]) {
+  it("accepts unknown but structurally complete heading vocabularies", () => {
+    for (const role of ["orchestra-implementer", "orchestra-reviewer", "orchestra-tester"]) {
+      const status = role === "orchestra-implementer" ? "complete" : role === "orchestra-reviewer" ? "approved" : "passed"
+      expect(
+        validateOrchestraRoleOutput(
+          role,
+          [
+            `STATUS: ${status}`,
+            "WORK_LOG: Updated the scoped implementation and preserved unrelated files.",
+            "QUALITY_GATES: Targeted tests, typecheck, and diff validation all passed.",
+            "OPEN_CONCERNS: No known blocking concerns remain after validation.",
+            "HANDOFF_TARGET: Lead should inspect the scoped diff and continue the workflow.",
+          ].join("\n"),
+        ),
+      ).toBeUndefined()
+    }
+  })
+
+  it("accepts varied enum-independent structural headings", () => {
+    const vocabularies = [
+      ["DELIVERED_WORK", "PROOF_OF_CHECKS", "UNRESOLVED_ITEMS", "ROUTING_DECISION"],
+      ["HASIL_KERJA", "BUKTI_VALIDASI", "CATATAN_RISIKO", "TINDAK_LANJUT"],
+      ["PATCH_OVERVIEW", "CONFIDENCE_EVIDENCE", "CAVEATS", "OWNER_HANDOFF"],
+    ]
+    for (const headings of vocabularies) {
       expect(
         validateOrchestraRoleOutput(
           "orchestra-implementer",
-          `STATUS: complete\n${heading}: some text\nVALIDATION: passed\nRISKS: none\nNEXT_ACTION: review`,
+          [
+            "STATUS: complete",
+            `${headings[0]}: Completed the requested scoped implementation with deterministic behavior.`,
+            `${headings[1]}: Ran targeted tests and repository validation successfully.`,
+            `${headings[2]}: No blocking concern remains; unrelated worktree files were preserved.`,
+            `${headings[3]}: Lead should review the scoped diff and continue to the next gate.`,
+          ].join("\n"),
         ),
-      ).toContain("CHANGES")
+      ).toBeUndefined()
     }
+  })
+
+  it("rejects structurally weak arbitrary vocabularies", () => {
+    expect(
+      validateOrchestraRoleOutput(
+        "orchestra-implementer",
+        "STATUS: complete\nWORK_LOG: changed code\nQUALITY_GATES: passed\nHANDOFF_TARGET: review",
+      ),
+    ).toContain("CHANGES")
+    expect(
+      validateOrchestraRoleOutput(
+        "orchestra-implementer",
+        "STATUS: complete\nSUMMARY: long summary text\nNOTES: more notes\nSCOPE: files\nDETAILS: details",
+      ),
+    ).toContain("CHANGES")
+    expect(
+      validateOrchestraRoleOutput(
+        "orchestra-implementer",
+        "STATUS: complete\nA: one\nB: two\nC: three\nD: four",
+      ),
+    ).toContain("CHANGES")
   })
 
   it("accepts bounded aliases, Markdown headings, and field order variations", () => {
