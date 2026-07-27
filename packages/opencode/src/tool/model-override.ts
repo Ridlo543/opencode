@@ -42,9 +42,25 @@ export type ModelOverrideResult =
   | { success: false; error: string }
 
 export type OrchestraRole = "orchestra-implementer" | "orchestra-reviewer" | "orchestra-tester"
+const orchestraRoles = new Set<string>(["orchestra-implementer", "orchestra-reviewer", "orchestra-tester"])
 
-// Bound specialist fan-out while allowing independent reviewer/tester work.
-export const ORCHESTRA_MAX_CONCURRENT_TASKS = 3
+export function isOrchestraRole(agent: string): agent is OrchestraRole {
+  return orchestraRoles.has(agent)
+}
+
+export function orchestraTaskAccessError(caller: string, target: string): string | undefined {
+  if (caller === "orchestra") {
+    if (isOrchestraRole(target)) return undefined
+    return `The orchestra Lead must delegate using orchestra-implementer, orchestra-reviewer, or orchestra-tester; received ${target}.`
+  }
+  if (isOrchestraRole(target)) {
+    return `${target} is a private Orchestra specialist and can only be delegated by the orchestra Lead.`
+  }
+  return undefined
+}
+
+// Match the native task fan-out while allowing any mix of specialist roles.
+export const ORCHESTRA_MAX_CONCURRENT_TASKS = 4
 
 export type OrchestraTaskCounts = Partial<Record<OrchestraRole, number>>
 
@@ -52,29 +68,124 @@ const orchestraContracts = {
   "orchestra-implementer": {
     statuses: ["complete", "blocked"],
     fields: ["CHANGES", "VALIDATION", "RISKS", "NEXT_ACTION"],
+    aliases: {
+      CHANGES: ["FILES_CHANGED", "IMPLEMENTATION", "MODIFICATIONS"],
+      VALIDATION: ["TESTS", "CHECKS"],
+      RISKS: ["REMAINING_RISKS"],
+      NEXT_ACTION: ["NEXT_STEPS"],
+    },
   },
   "orchestra-reviewer": {
     statuses: ["approved", "needs_revision", "blocked"],
     fields: ["FINDINGS", "VALIDATION", "RISKS", "NEXT_ACTION"],
+    aliases: {
+      FINDINGS: ["REVIEW_FINDINGS", "ISSUES"],
+      VALIDATION: ["TESTS", "CHECKS"],
+      RISKS: ["REMAINING_RISKS"],
+      NEXT_ACTION: ["NEXT_STEPS"],
+    },
   },
   "orchestra-tester": {
     statuses: ["passed", "failed", "blocked"],
     fields: ["CHANGES", "VALIDATION", "FAILURES", "NEXT_ACTION"],
+    aliases: {
+      CHANGES: ["FILES_CHANGED", "TEST_CHANGES"],
+      VALIDATION: ["TESTS", "CHECKS"],
+      FAILURES: ["TEST_FAILURES", "FAILING_TESTS"],
+      NEXT_ACTION: ["NEXT_STEPS"],
+    },
   },
-} satisfies Record<OrchestraRole, { statuses: string[]; fields: string[] }>
+} satisfies Record<
+  OrchestraRole,
+  { statuses: string[]; fields: string[]; aliases: Record<string, readonly string[]> }
+>
+
+function normalizeHandoffHeading(value: string) {
+  return value
+    .replace(/^[\s#>*-]+/, "")
+    .replace(/[*`~]/g, "")
+    .trim()
+    .replace(/[\s-]+/g, "_")
+    .toUpperCase()
+}
+
+function parseHandoffSections(output: string, canonical: Map<string, string>) {
+  const sections = new Map<string, string[]>()
+  let current: string | undefined
+  let fence: string | undefined
+  for (const line of output.split(/\r?\n/)) {
+    const fenceMatch = line.match(/^\s*(```+|~~~+)/)
+    if (fenceMatch) {
+      fence = fence ? undefined : fenceMatch[1]?.[0]
+      continue
+    }
+    if (fence || /^\s*>/.test(line)) continue
+    const match = line.match(/^\s*(?:[#[*-]+\s*)?(?:[*_`~]+\s*)?([A-Za-z][A-Za-z _-]*?)(?:\s*[*_`~]+)?\s*(?::\s*(.*))?$/)
+    const rawHeading = match?.[1]?.trim() ?? ""
+    const heading = normalizeHandoffHeading(rawHeading)
+    const field = canonical.get(heading)
+    const markdownHeading = /^\s*#{1,6}\s+/.test(line)
+    const bullet = /^\s*[-*+]\s+/.test(line)
+    const explicit = line.includes(":") || markdownHeading
+    if (match && field && explicit) {
+      current = field
+      const value = match[2]?.trim()
+      // Canonical and alias duplicates are one section; the final declaration wins.
+      sections.set(field, value ? [value] : [])
+      continue
+    }
+    // An explicit unknown heading must not become content for the preceding field.
+    const protocolHeading = rawHeading === rawHeading.toUpperCase()
+    if (match && (markdownHeading || (line.includes(":") && !bullet && protocolHeading))) {
+      current = undefined
+      continue
+    }
+    if (current && line.trim()) sections.get(current)?.push(line.trim())
+  }
+  return sections
+}
+
+function finalHandoffStatus(output: string) {
+  let result: { status: string; line: number } | undefined
+  let fence: string | undefined
+  const lines = output.split(/\r?\n/)
+  for (let line = 0; line < lines.length; line++) {
+    const value = lines[line] ?? ""
+    const fenceMatch = value.match(/^\s*(```+|~~~+)/)
+    if (fenceMatch) {
+      fence = fence ? undefined : fenceMatch[1]?.[0]
+      continue
+    }
+    if (fence || /^\s*>/.test(value)) continue
+    const match = value.match(/^\s*(?:[#[*-]+\s*)?(?:[*_`~]+\s*)?STATUS\s*(?:[*_`~]+\s*)?:\s*([^;]+?)\s*$/i)
+    if (!match) continue
+    result = {
+      status: (match[1] ?? "")
+        .replace(/^[*_`~]+|[*_`~]+$/g, "")
+        .trim()
+        .toLowerCase(),
+      line,
+    }
+  }
+  return result ? { status: result.status, handoff: lines.slice(result.line + 1).join("\n") } : undefined
+}
+
+function hasMeaningfulHandoffValue(lines: string[] | undefined) {
+  if (!lines) return false
+  const value = lines
+    .join("\n")
+    .replace(/^\s*[-*+]\s*/gm, "")
+    .trim()
+  if (!value || !/[\p{L}\p{N}]/u.test(value)) return false
+  return !/^(?:<\s*(?:text|value|todo)\s*>|\.{2,}|tbd|todo)$/i.test(value)
+}
 
 export function orchestraConcurrencyError(counts: OrchestraTaskCounts, role: string): string | undefined {
-  if (!(role in { "orchestra-implementer": true, "orchestra-reviewer": true, "orchestra-tester": true })) {
-    return undefined
-  }
+  if (!isOrchestraRole(role)) return undefined
 
   const total = Object.values(counts).reduce((sum, value) => sum + (value ?? 0), 0)
   if (total >= ORCHESTRA_MAX_CONCURRENT_TASKS) {
     return `The orchestra Lead already has ${total} active specialist tasks (maximum ${ORCHESTRA_MAX_CONCURRENT_TASKS}). Wait for one to finish before delegating another.`
-  }
-
-  if ((counts[role as OrchestraRole] ?? 0) > 0) {
-    return `The orchestra role ${role} already has an active task. Reuse its task_id or wait for it to finish instead of starting a concurrent duplicate.`
   }
 
   return undefined
@@ -88,50 +199,33 @@ export function validateOrchestraRoleOutput(role: string, output: string): strin
   const contract = orchestraContracts[role as OrchestraRole]
   if (!contract) return undefined
 
-  // Use the final STATUS line so examples or earlier discussion cannot satisfy
-  // the contract. Markdown decoration around field names remains tolerated.
-  const statuses = [...output.matchAll(/(?:^|\r?\n)\s*(?:[#>*-]+\s*)?(?:[*_`~]+\s*)?STATUS\s*(?:[*_`~]+\s*)?:\s*([^\r\n;]+)/gi)]
-  const match = statuses.at(-1)
-  const status = match?.[1]
-    ?.replace(/^[*_`~]+|[*_`~]+$/g, "")
-    .trim()
-    .toLowerCase()
-  const handoff = match ? output.slice((match.index ?? 0) + match[0].length) : ""
-  const complete = contract.fields.every((field) =>
-    new RegExp(`(?:^|\\r?\\n)\\s*(?:[#>*-]+\\s*)?(?:[*_\`~]+\\s*)?${field}\\s*(?:[*_\`~]+\\s*)?:`, "i").test(
-      handoff,
-    ),
-  )
+  // Use the final unquoted STATUS line outside code fences so examples and raw
+  // transcripts cannot satisfy the contract. Parse only the handoff after it.
+  const final = finalHandoffStatus(output)
+  const status = final?.status
+  const handoff = final?.handoff ?? ""
+  const canonical = new Map<string, string>()
+  const aliases = contract.aliases as Record<string, readonly string[]>
+  for (const field of contract.fields) {
+    canonical.set(field, field)
+    for (const alias of aliases[field] ?? []) canonical.set(alias, field)
+  }
+  // SUMMARY is useful context but deliberately not a substitute for role evidence.
+  canonical.set("SUMMARY", "SUMMARY")
+  const sections = parseHandoffSections(handoff, canonical)
+  const complete = contract.fields.every((field) => hasMeaningfulHandoffValue(sections.get(field)))
   if (status && contract.statuses.includes(status) && complete) return undefined
 
   return `${role} must return a complete handoff with STATUS (${contract.statuses.join(", ")}) and fields ${contract.fields.join(", ")}.`
 }
 
-export function orchestraHandoffSchema(role: string): Record<string, unknown> | undefined {
+export function orchestraHandoffInstruction(role: string): string | undefined {
   const contract = orchestraContracts[role as OrchestraRole]
   if (!contract) return undefined
 
-  return {
-    type: "object",
-    properties: {
-      status: { type: "string", enum: contract.statuses },
-      ...Object.fromEntries(contract.fields.map((field) => [field.toLowerCase(), { type: "string" }])),
-    },
-    required: ["status", ...contract.fields.map((field) => field.toLowerCase())],
-    additionalProperties: false,
-  }
-}
-
-export function renderOrchestraHandoff(role: string, value: unknown): string | undefined {
-  const contract = orchestraContracts[role as OrchestraRole]
-  if (!contract || typeof value !== "object" || value === null) return undefined
-  const output = value as Record<string, unknown>
-  if (typeof output.status !== "string" || !contract.statuses.includes(output.status)) return undefined
-  if (!contract.fields.every((field) => typeof output[field.toLowerCase()] === "string")) return undefined
-
   return [
-    `STATUS: ${output.status}`,
-    ...contract.fields.map((field) => `${field}: ${output[field.toLowerCase()]}`),
+    `First line: STATUS: one of ${contract.statuses.join(", ")}`,
+    ...contract.fields.map((field) => `Required field: ${field}: <text>`),
   ].join("\n")
 }
 

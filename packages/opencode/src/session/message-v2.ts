@@ -131,7 +131,7 @@ function providerMeta(metadata: Record<string, any> | undefined) {
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+  options?: { stripMedia?: boolean; toolOutputMaxChars?: number; flattenTools?: boolean },
 ) {
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
@@ -288,6 +288,22 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             type: "step-start",
           })
         if (part.type === "tool") {
+          if (options?.flattenTools) {
+            const input = JSON.stringify(part.state.input)
+            const output =
+              part.state.status === "completed"
+                ? part.state.time.compacted
+                  ? "[Old tool result content cleared]"
+                  : truncateToolOutput(part.state.output, options.toolOutputMaxChars)
+                : part.state.status === "error"
+                  ? part.state.error
+                  : "[Tool execution was interrupted]"
+            assistantMessage.parts.push({
+              type: "text",
+              text: `[Tool call: ${part.tool}]\nInput: ${input}\nResult: ${output}`,
+            })
+            continue
+          }
           toolNames.add(part.tool)
           if (part.state.status === "completed") {
             const outputText = part.state.time.compacted
@@ -417,7 +433,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 export function toModelMessages(
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+  options?: { stripMedia?: boolean; toolOutputMaxChars?: number; flattenTools?: boolean },
 ): Promise<ModelMessage[]> {
   return Effect.runPromise(toModelMessagesEffect(input, model, options))
 }

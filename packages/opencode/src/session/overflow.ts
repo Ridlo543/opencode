@@ -26,6 +26,7 @@ export function isOverflow(input: {
   outputTokenMax?: number
 }) {
   if (input.cfg.compaction?.auto === false) return false
+  if (input.model.limit.context === 0) return false
 
   const count =
     input.tokens.total || input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write

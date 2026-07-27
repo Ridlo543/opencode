@@ -8,6 +8,8 @@ import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
+import * as Delegation from "../agent/delegation"
+import { Permission } from "../permission"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
@@ -19,9 +21,9 @@ import { Database } from "@opencode-ai/core/database/database"
 import {
   resolveFinalModel,
   orchestraConcurrencyError,
+  orchestraTaskAccessError,
+  orchestraHandoffInstruction,
   normalizeOrchestraRoleOutput,
-  orchestraHandoffSchema,
-  renderOrchestraHandoff,
   resolveModelOverride,
   validateOrchestraRoleOutput,
   type ModelOverride,
@@ -51,6 +53,34 @@ const BACKGROUND_UPDATED = [
   "DO NOT sleep, poll for progress, ask the task for status, or duplicate this task's work — avoid working with the same files or topics it is using.",
   "Work on non-overlapping tasks, or briefly tell the user what you sent and end your response.",
 ].join("\n")
+const HANDOFF_TASK_MAX_CHARS = 8_000
+const HANDOFF_EVIDENCE_MAX_CHARS = 12_000
+const HANDOFF_TOOL_OUTPUT_MAX_CHARS = 2_000
+
+function handoffRepairEvidence(messages: SessionV1.WithParts[]) {
+  const rows = messages.flatMap((message) =>
+    message.parts.flatMap((part) => {
+      if (part.type === "text" && message.info.role === "assistant" && part.text.trim()) {
+        return [`ASSISTANT:\n${part.text.trim()}`]
+      }
+      if (part.type !== "tool") return []
+      const result =
+        part.state.status === "completed"
+          ? part.state.output
+          : part.state.status === "error"
+            ? part.state.error
+            : "[interrupted]"
+      return [
+        [
+          `TOOL: ${part.tool}`,
+          `INPUT: ${JSON.stringify(part.state.input)}`,
+          `RESULT: ${result.slice(0, HANDOFF_TOOL_OUTPUT_MAX_CHARS)}`,
+        ].join("\n"),
+      ]
+    }),
+  )
+  return rows.join("\n\n").slice(-HANDOFF_EVIDENCE_MAX_CHARS) || "(no tool or text evidence recorded)"
+}
 
 const BaseParameterFields = {
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
@@ -151,15 +181,17 @@ export const TaskTool = Tool.define(
       }
 
       const parent = yield* sessions.get(ctx.sessionID)
-      if (
-        parent.agent === "orchestra" &&
-        !["orchestra-implementer", "orchestra-reviewer", "orchestra-tester"].includes(params.subagent_type)
-      ) {
-        return yield* Effect.fail(
-          new Error(
-            `The orchestra Lead must delegate using orchestra-implementer, orchestra-reviewer, or orchestra-tester; received ${params.subagent_type}.`,
-          ),
-        )
+      const accessError = orchestraTaskAccessError(parent.agent ?? ctx.agent, params.subagent_type)
+      if (accessError) return yield* Effect.fail(new Error(accessError))
+      const caller = yield* agent.get(parent.agent ?? ctx.agent)
+      if (!caller) return yield* Effect.fail(new Error(`Unknown caller agent: ${parent.agent ?? ctx.agent}`))
+      const taskPermission = Permission.evaluate(
+        "task",
+        params.subagent_type,
+        Permission.merge(caller.permission, parent.permission ?? []),
+      )
+      if (taskPermission.action === "deny") {
+        return yield* Effect.fail(new Error(`${caller.name} is not permitted to delegate to ${params.subagent_type}.`))
       }
       let current = parent
       let depth = 0
@@ -224,10 +256,13 @@ export const TaskTool = Tool.define(
       const session = params.task_id
         ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
-      if (session && (session.parentID !== ctx.sessionID || (session.agent !== undefined && session.agent !== next.name))) {
+      if (
+        session &&
+        !Delegation.matches(session, { kind: "delegated-task", parentID: ctx.sessionID, agent: next.name })
+      ) {
         return yield* Effect.fail(
           new Error(
-            `Cannot resume task ${session.id}: it belongs to a different parent session or role (${session.agent ?? "unknown"}).`,
+            `Cannot resume task ${session.id}: it is not a delegated ${next.name} task owned by this parent session.`,
           ),
         )
       }
@@ -254,6 +289,7 @@ export const TaskTool = Tool.define(
           parentID: ctx.sessionID,
           title: params.description + ` (@${next.name} subagent)`,
           agent: next.name,
+          internalMetadata: Delegation.metadata({ kind: "delegated-task", parentID: ctx.sessionID, agent: next.name }),
           permission: [
             ...childPermission,
             ...childToolDenies.filter(
@@ -265,8 +301,14 @@ export const TaskTool = Tool.define(
             ),
           ],
         }))
+      if (session) yield* sessions.setPermission({ sessionID: session.id, permission: [...childPermission, ...childToolDenies] })
       const existingJob = yield* background.get(nextSession.id)
       const isRunningContinuation = existingJob?.status === "running"
+      if (isRunningContinuation && parent.agent === "orchestra") {
+        return yield* Effect.fail(
+          new Error(`Cannot continue running Orchestra task ${nextSession.id}; wait for its handoff or cancel it first.`),
+        )
+      }
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
         Effect.provideService(Database.Service, database),
@@ -320,14 +362,21 @@ export const TaskTool = Tool.define(
           .filter((item): item is Extract<typeof item, { type: "text" }> => item.type === "text")
           .map((item) => item.text)
           .join("\n")
-        const schema = orchestraHandoffSchema(next.name)
-        if (!schema || !validateOrchestraRoleOutput(next.name, output)) return output
+        const instruction = orchestraHandoffInstruction(next.name)
+        if (!instruction || !validateOrchestraRoleOutput(next.name, output)) return output
 
-        const originalPermission = nextSession.permission ?? []
+        const evidence = handoffRepairEvidence(yield* sessions.messages({ sessionID: nextSession.id }))
+        const repairSession = yield* sessions.create({
+          parentID: ctx.sessionID,
+          title: `${params.description} handoff repair (@${next.name} subagent)`,
+          agent: next.name,
+          internalMetadata: Delegation.metadata({ kind: "handoff-repair", parentID: ctx.sessionID, agent: next.name }),
+          permission: nextSession.permission,
+        })
         const repair = yield* ops
           .prompt({
             messageID: MessageID.ascending(),
-            sessionID: nextSession.id,
+            sessionID: repairSession.id,
             model: {
               modelID: model.modelID,
               providerID: model.providerID,
@@ -335,14 +384,16 @@ export const TaskTool = Tool.define(
             variant: (modelOverride || next.model) ? undefined : variant,
             agent: next.name,
             tools: { "*": false },
-            format: new SessionV1.OutputFormatJsonSchema({ type: "json_schema", schema, retryCount: 1 }),
             parts: [
               {
                 type: "text",
                 text: [
                   "Return the final Orchestra handoff now based only on work and validation already completed.",
-                  "Do not inspect, edit, or run commands. Use the required structured output exactly once.",
+                  "Do not inspect, edit, run commands, or call tools. Respond with plain text only.",
                   "Do not claim success for incomplete or unvalidated work; choose the role's blocked or failed status and state what remains.",
+                  instruction,
+                  `Original task:\n${params.prompt.slice(0, HANDOFF_TASK_MAX_CHARS)}`,
+                  `Recorded work and validation evidence:\n${evidence}`,
                   `The previous response was incomplete. Preserve this evidence in the appropriate field:\n${output || "(no text response)"}`,
                 ].join("\n\n"),
               },
@@ -350,11 +401,14 @@ export const TaskTool = Tool.define(
           })
           .pipe(
             Effect.exit,
-            Effect.ensuring(sessions.setPermission({ sessionID: nextSession.id, permission: originalPermission })),
+            Effect.ensuring(sessions.setArchived({ sessionID: repairSession.id, time: Date.now() })),
           )
         if (Exit.isSuccess(repair) && repair.value.info.role === "assistant" && !repair.value.info.error) {
-          const rendered = renderOrchestraHandoff(next.name, repair.value.info.structured)
-          if (rendered) return rendered
+          const rendered = repair.value.parts
+            .filter((item): item is Extract<typeof item, { type: "text" }> => item.type === "text")
+            .map((item) => item.text)
+            .join("\n")
+          if (!validateOrchestraRoleOutput(next.name, rendered)) return rendered
         }
 
         const repairError =

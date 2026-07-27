@@ -3,8 +3,9 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
-import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
+import * as Delegation from "../../src/agent/delegation"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Config } from "@/config/config"
@@ -169,12 +170,6 @@ function reply(input: SessionPrompt.PromptInput, text: string): SessionV1.WithPa
   }
 }
 
-function structuredReply(input: SessionPrompt.PromptInput, structured: Record<string, unknown>): SessionV1.WithParts {
-  const result = reply(input, "")
-  if (result.info.role === "assistant") result.info.structured = structured
-  return result
-}
-
 function failedReply(input: SessionPrompt.PromptInput, message: string): SessionV1.WithParts {
   const result = reply(input, "")
   if (result.info.role !== "assistant") return result
@@ -188,7 +183,7 @@ describe("tool.task", () => {
       const { chat, assistant } = yield* seedAgent("orchestra")
       const tool = yield* TaskTool
       const def = yield* tool.init()
-      let seen: SessionPrompt.PromptInput | undefined
+      const seen: SessionPrompt.PromptInput[] = []
 
       yield* def.execute(
         {
@@ -203,7 +198,7 @@ describe("tool.task", () => {
           abort: new AbortController().signal,
           extra: {
             promptOps: stubOps({
-              onPrompt: (input) => (seen = input),
+              onPrompt: (input) => seen.push(input),
               text: "STATUS: complete\nCHANGES: none\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review",
             }),
           },
@@ -213,9 +208,10 @@ describe("tool.task", () => {
         },
       )
 
-      expect(seen?.agent).toBe("orchestra-implementer")
-      expect(seen?.model?.providerID as string).toBe("9router")
-      expect(seen?.model?.modelID as string).toBe("ag/gemini-3-flash-agent")
+      expect(seen).toHaveLength(1)
+      expect(seen[0]?.agent).toBe("orchestra-implementer")
+      expect(seen[0]?.model?.providerID as string).toBe("9router")
+      expect(seen[0]?.model?.modelID as string).toBe("ag/gemini-3-flash-agent")
     }),
     {
       config: {
@@ -334,13 +330,10 @@ describe("tool.task", () => {
                 prompts.push(input)
                 if (prompts.length === 1) return Effect.succeed(reply(input, ""))
                 return Effect.succeed(
-                  structuredReply(input, {
-                    status: "complete",
-                    changes: "updated migration",
-                    validation: "db:migrate passed",
-                    risks: "none",
-                    next_action: "review",
-                  }),
+                  reply(
+                    input,
+                    "STATUS: complete\nCHANGES: updated migration\nVALIDATION: db:migrate passed\nRISKS: none\nNEXT_ACTION: review",
+                  ),
                 )
               },
             } satisfies TaskPromptOps,
@@ -352,11 +345,16 @@ describe("tool.task", () => {
       )
 
       expect(prompts).toHaveLength(2)
+      expect(prompts[1]?.sessionID).not.toBe(prompts[0]?.sessionID)
       expect(prompts[1]?.tools).toEqual({ "*": false })
-      expect(prompts[1]?.format?.type).toBe("json_schema")
-      expect(prompts[1]?.format).toBeInstanceOf(SessionV1.OutputFormatJsonSchema)
+      expect(prompts[1]?.format).toBeUndefined()
+      expect(prompts[1]?.parts[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining("Original task:\nimplement the requested change"),
+      })
       expect(result.output).toContain("STATUS: complete")
       expect(result.output).toContain("CHANGES: updated migration")
+      expect((yield* sessions.get(prompts[1]!.sessionID)).time.archived).toBeNumber()
       expect((yield* sessions.get(result.metadata.sessionId)).permission).not.toContainEqual({
         permission: "*",
         pattern: "*",
@@ -373,37 +371,86 @@ describe("tool.task", () => {
     },
   )
 
+  it.instance("accepts a complete human-readable implementer handoff without repair", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const prompts: SessionPrompt.PromptInput[] = []
+      const output = [
+        "STATUS: complete",
+        "SUMMARY: Closed the fixture drift finding.",
+        "FILES_CHANGED:",
+        "- tools/regenerate-binding-fixtures.mjs",
+        "VALIDATION:",
+        "- targeted checks passed",
+        "RISKS:",
+        "- none",
+        "NEXT_ACTION:",
+        "- review",
+      ].join("\n")
+
+      const result = yield* def.execute(
+        {
+          description: "implement fixture hardening",
+          prompt: "implement the requested fixture hardening",
+          subagent_type: "orchestra-implementer",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "orchestra",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: {
+              ...stubOps(),
+              prompt: (input) => {
+                prompts.push(input)
+                return Effect.succeed(reply(input, output))
+              },
+            } satisfies TaskPromptOps,
+          },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(prompts).toHaveLength(1)
+      expect(result.output).toContain("STATUS: complete")
+      expect(result.output).toContain("FILES_CHANGED:")
+      expect(result.output).not.toContain("invalid_handoff")
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
   it.instance("repairs reviewer and tester handoffs with their role-specific fields", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seedAgent("orchestra")
+      const sessions = yield* Session.Service
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
       for (const testCase of [
         {
           role: "orchestra-reviewer",
-          structured: {
-            status: "approved",
-            findings: "none",
-            validation: "targeted tests passed",
-            risks: "none",
-            next_action: "test",
-          },
+          output: "STATUS: approved\nFINDINGS: none\nVALIDATION: targeted tests passed\nRISKS: none\nNEXT_ACTION: test",
           field: "FINDINGS: none",
         },
         {
           role: "orchestra-tester",
-          structured: {
-            status: "passed",
-            changes: "none",
-            validation: "suite passed",
-            failures: "none",
-            next_action: "complete",
-          },
+          output: "STATUS: passed\nCHANGES: none\nVALIDATION: suite passed\nFAILURES: none\nNEXT_ACTION: complete",
           field: "FAILURES: none",
         },
       ]) {
-        let prompts = 0
+        const prompts: SessionPrompt.PromptInput[] = []
         const result = yield* def.execute(
           {
             description: "finish specialist handoff",
@@ -419,9 +466,9 @@ describe("tool.task", () => {
               promptOps: {
                 ...stubOps(),
                 prompt: (input) => {
-                  prompts++
-                  if (prompts === 1) return Effect.succeed(reply(input, ""))
-                  return Effect.succeed(structuredReply(input, testCase.structured))
+                  prompts.push(input)
+                  if (prompts.length === 1) return Effect.succeed(reply(input, ""))
+                  return Effect.succeed(reply(input, testCase.output))
                 },
               } satisfies TaskPromptOps,
             },
@@ -431,7 +478,12 @@ describe("tool.task", () => {
           },
         )
 
-        expect(prompts).toBe(2)
+        expect(prompts).toHaveLength(2)
+        expect(prompts[1]?.sessionID).not.toBe(prompts[0]?.sessionID)
+        expect(prompts[1]?.agent).toBe(testCase.role)
+        expect(prompts[1]?.model).toEqual(prompts[0]?.model)
+        expect((yield* sessions.get(prompts[1]!.sessionID)).time.archived).toBeNumber()
+        expect(result.metadata.sessionId).toBe(prompts[0]?.sessionID)
         expect(result.output).toContain(testCase.field)
       }
     }),
@@ -573,6 +625,96 @@ describe("tool.task", () => {
     }),
   )
 
+  it.instance("rejects private Orchestra specialists from native Build", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("build")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const exit = yield* def
+        .execute(
+          {
+            description: "invalid private delegation",
+            prompt: "implement work",
+            subagent_type: "orchestra-implementer",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(String(Cause.squash(exit.cause))).toContain("private Orchestra specialist")
+    }),
+    {
+      config: {
+        agent: {
+          "orchestra-implementer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "shows Orchestra specialists only to the Orchestra Lead",
+    () =>
+      Effect.gen(function* () {
+        const agent = yield* Agent.Service
+        const registry = yield* ToolRegistry.Service
+        const build = yield* agent.get("build")
+        const orchestra = yield* agent.get("orchestra")
+        const describe = Effect.fnUntraced(function* (caller: Agent.Info) {
+          return (yield* registry.tools({ ...ref, agent: caller })).find((tool) => tool.id === TaskTool.id)?.description ?? ""
+        })
+
+        const buildDescription = yield* describe(build)
+        const orchestraDescription = yield* describe(orchestra)
+        expect(buildDescription).not.toContain("orchestra-implementer")
+        expect(buildDescription).not.toContain("orchestra-reviewer")
+        expect(buildDescription).not.toContain("orchestra-tester")
+        expect(orchestraDescription).toContain("orchestra-implementer")
+        expect(orchestraDescription).toContain("orchestra-reviewer")
+        expect(orchestraDescription).toContain("orchestra-tester")
+        expect(orchestraDescription).not.toContain("- general:")
+        expect(orchestraDescription).not.toContain("- explore:")
+      }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": { mode: "subagent" },
+          "orchestra-reviewer": { mode: "subagent" },
+          "orchestra-tester": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "keeps reserved Orchestra specialists hidden subagents after config merge",
+    () =>
+      Effect.gen(function* () {
+        const agent = yield* Agent.Service
+        const specialist = yield* agent.get("orchestra-implementer")
+        expect(specialist.mode).toBe("subagent")
+        expect(specialist.hidden).toBe(true)
+      }),
+    {
+      config: {
+        agent: {
+          "orchestra-implementer": { mode: "primary", hidden: false },
+        },
+      },
+    },
+  )
+
   it.instance(
     "description sorts subagents by name and is stable across calls",
     () =>
@@ -654,7 +796,12 @@ describe("tool.task", () => {
     Effect.gen(function* () {
       const sessions = yield* Session.Service
       const { chat, assistant } = yield* seed()
-      const child = yield* sessions.create({ parentID: chat.id, title: "Existing child" })
+      const child = yield* sessions.create({
+        parentID: chat.id,
+        title: "Existing child",
+        agent: "general",
+        internalMetadata: Delegation.metadata({ kind: "delegated-task", parentID: chat.id, agent: "general" }),
+      })
       const tool = yield* TaskTool
       const def = yield* tool.init()
       let seen: SessionPrompt.PromptInput | undefined
@@ -1217,13 +1364,124 @@ describe("tool.task", () => {
     }),
   )
 
-  background.instance("keeps an orchestra role reserved until its continuation finishes", () =>
+  it.instance("rejects task_id sessions without delegated-task provenance", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const child = yield* sessions.create({ parentID: chat.id, title: "Unowned child", agent: "general" })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const exit = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+            task_id: child.id,
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+    }),
+  )
+
+  it.instance("rejects handoff repair sessions as task_id continuations", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const repair = yield* sessions.create({
+        parentID: chat.id,
+        title: "repair",
+        agent: "orchestra-reviewer",
+        internalMetadata: Delegation.metadata({ kind: "handoff-repair", parentID: chat.id, agent: "orchestra-reviewer" }),
+      })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const exit = yield* def
+        .execute(
+          {
+            description: "review",
+            prompt: "review",
+            subagent_type: "orchestra-reviewer",
+            task_id: repair.id,
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "orchestra",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+    }),
+    {
+      config: { agent: { orchestra: { mode: "primary" }, "orchestra-reviewer": { mode: "subagent" } } },
+    },
+  )
+
+  it.instance("protects delegated-task provenance from user metadata writes", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const parent = yield* sessions.create({ title: "parent" })
+      const spoofed = yield* sessions.create({
+        parentID: parent.id,
+        agent: "orchestra-implementer",
+        metadata: {
+          user: "kept",
+          "opencode.task.kind": "delegated-task",
+          "opencode.task.parent": parent.id,
+          "opencode.task.agent": "orchestra-implementer",
+        },
+      })
+      expect(Delegation.isDelegatedTo(spoofed, "orchestra-implementer")).toBe(false)
+      expect(spoofed.metadata).toEqual({ user: "kept" })
+
+      const delegated = yield* sessions.create({
+        parentID: parent.id,
+        agent: "orchestra-implementer",
+        internalMetadata: Delegation.metadata({
+          kind: "delegated-task",
+          parentID: parent.id,
+          agent: "orchestra-implementer",
+        }),
+      })
+      yield* sessions.setMetadata({
+        sessionID: delegated.id,
+        metadata: {
+          user: "updated",
+          "opencode.task.kind": "handoff-repair",
+        },
+      })
+      const updated = yield* sessions.get(delegated.id)
+      expect(Delegation.isDelegatedTo(updated, "orchestra-implementer")).toBe(true)
+      expect(updated.metadata?.user).toBe("updated")
+      expect(updated.metadata?.["opencode.task.kind"]).toBe("delegated-task")
+    }),
+  )
+
+  background.instance("allows concurrent Orchestra tasks with the same role but rejects a running continuation", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seedAgent("orchestra")
       const tool = yield* TaskTool
       const def = yield* tool.init()
       const first = defer<void>()
-      const second = defer<void>()
       let prompts = 0
       const promptOps: TaskPromptOps = {
         ...stubOps(),
@@ -1233,8 +1491,7 @@ describe("tool.task", () => {
             input,
             "STATUS: blocked\nCHANGES: none\nVALIDATION: blocked\nRISKS: none\nNEXT_ACTION: continue",
           )
-          if (prompts === 1) return Effect.promise(() => first.promise).pipe(Effect.as(handoff))
-          return Effect.promise(() => second.promise).pipe(Effect.as(handoff))
+          return Effect.promise(() => first.promise).pipe(Effect.as(handoff))
         },
       }
       const context = {
@@ -1257,31 +1514,32 @@ describe("tool.task", () => {
         },
         context,
       )
-      yield* def.execute(
-        {
-          description: "finish handoff",
-          prompt: "stop exploring and return the handoff",
-          subagent_type: "orchestra-implementer",
-          task_id: started.metadata.sessionId,
-        },
-        context,
-      )
-      first.resolve()
-
-      const duplicate = yield* def
+      const continuation = yield* def
         .execute(
           {
-            description: "duplicate implementation",
-            prompt: "implement another change",
+            description: "finish handoff",
+            prompt: "stop exploring and return the handoff",
             subagent_type: "orchestra-implementer",
-            background: true,
+            task_id: started.metadata.sessionId,
           },
           context,
         )
         .pipe(Effect.exit)
+      expect(Exit.isFailure(continuation)).toBe(true)
 
-      expect(Exit.isFailure(duplicate)).toBe(true)
-      second.resolve()
+      const concurrent = yield* def.execute(
+        {
+          description: "parallel implementation",
+          prompt: "implement another independent change",
+          subagent_type: "orchestra-implementer",
+          background: true,
+        },
+        context,
+      )
+
+      expect(concurrent.metadata.sessionId).not.toBe(started.metadata.sessionId)
+      expect(concurrent.output).toContain('state="running"')
+      first.resolve()
     }),
     {
       config: {

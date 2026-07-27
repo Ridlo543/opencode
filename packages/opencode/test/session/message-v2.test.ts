@@ -821,6 +821,52 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
+  test("flattens tool exchanges for provider-agnostic compaction history", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "search code" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "grep",
+            state: {
+              status: "completed",
+              input: { pattern: "scenario" },
+              output: "one match",
+              title: "Grep",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model, { flattenTools: true })).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "search code" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: '[Tool call: grep]\nInput: {"pattern":"scenario"}\nResult: one match',
+          },
+        ],
+      },
+    ])
+  })
+
   test("converts assistant tool error into error-text tool result", async () => {
     const userID = "m-user"
     const assistantID = "m-assistant"

@@ -11,6 +11,7 @@ import path from "path"
 import { fileURLToPath } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Agent as AgentSvc } from "../../src/agent/agent"
+import * as Delegation from "../../src/agent/delegation"
 import { BackgroundJob } from "@/background/job"
 import { Command } from "../../src/command"
 import { Config } from "@/config/config"
@@ -443,6 +444,122 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
 })
 
 // Loop semantics
+
+it.instance(
+  "public prompt cannot select a private Orchestra specialist",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Build", agent: "build" })
+      const exit = yield* prompt
+        .prompt({
+          sessionID: chat.id,
+          agent: "orchestra-implementer",
+          noReply: true,
+          parts: [{ type: "text", text: "implement directly" }],
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(yield* sessions.messages({ sessionID: chat.id })).toHaveLength(0)
+    }),
+  { config: { agent: { "orchestra-implementer": { mode: "subagent" } } } },
+)
+
+it.instance(
+  "public prompt cannot bypass TaskTool on a valid delegated specialist session",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const parent = yield* sessions.create({ title: "Orchestra", agent: "orchestra" })
+      const child = yield* sessions.create({
+        parentID: parent.id,
+        title: "Implementer",
+        agent: "orchestra-implementer",
+        internalMetadata: Delegation.metadata({
+          kind: "delegated-task",
+          parentID: parent.id,
+          agent: "orchestra-implementer",
+        }),
+      })
+      const exit = yield* prompt
+        .prompt({
+          sessionID: child.id,
+          agent: "orchestra-implementer",
+          noReply: true,
+          parts: [{ type: "text", text: "bypass lifecycle" }],
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(yield* sessions.messages({ sessionID: child.id })).toHaveLength(0)
+    }),
+  {
+    config: {
+      agent: { orchestra: { mode: "primary" }, "orchestra-implementer": { mode: "subagent" } },
+    },
+  },
+)
+
+it.instance(
+  "an existing native session can switch to the Orchestra primary agent",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Build", agent: "build" })
+      const exit = yield* prompt
+        .prompt({
+          sessionID: chat.id,
+          agent: "orchestra",
+          noReply: true,
+          parts: [{ type: "text", text: "switch workflow" }],
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect((yield* sessions.get(chat.id)).agent).toBe("orchestra")
+    }),
+  { config: { agent: { orchestra: { mode: "primary" } } } },
+)
+
+it.instance(
+  "public shell cannot attribute execution to a private Orchestra specialist",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Build", agent: "build" })
+      const exit = yield* prompt
+        .shell({
+          sessionID: chat.id,
+          agent: "orchestra-implementer",
+          command: "echo blocked",
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(yield* sessions.messages({ sessionID: chat.id })).toHaveLength(0)
+    }),
+  { config: { agent: { "orchestra-implementer": { mode: "subagent" } } } },
+)
+
+it.instance(
+  "the orchestra slash command can transition a native session through its trusted path",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        command: { orchestra: { template: "$ARGUMENTS", agent: "orchestra" } },
+        agent: { orchestra: { mode: "primary" } },
+      }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Build", agent: "build" })
+      yield* llm.text("STATUS: blocked\nCHANGES: none\nVALIDATION: not started\nRISKS: none\nNEXT_ACTION: plan")
+      const result = yield* prompt.command({ sessionID: chat.id, command: "orchestra", arguments: "plan this" })
+      expect(result.info.role).toBe("assistant")
+      expect((yield* sessions.get(chat.id)).agent).toBe("orchestra")
+    }),
+)
 
 noLLMServer.instance(
   "loop exits immediately when last assistant has stop finish",

@@ -31,6 +31,7 @@ import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/l
 import { Reference } from "@opencode-ai/core/reference"
 import { Location } from "@opencode-ai/core/location"
 import { PluginV2 } from "@opencode-ai/core/plugin"
+import { isOrchestraRole } from "@/tool/model-override"
 
 export const Info = Schema.Struct({
   name: Schema.String,
@@ -292,6 +293,11 @@ const layer = Layer.effect(
           item.steps = value.steps ?? item.steps
           item.options = mergeDeep(item.options, value.options ?? {})
           item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))
+        }
+        for (const item of Object.values(agents)) {
+          if (!isOrchestraRole(item.name)) continue
+          item.mode = "subagent"
+          item.hidden = true
         }
 
         // Ensure Truncate.GLOB is allowed unless explicitly configured

@@ -5,10 +5,10 @@
 import { describe, expect, it } from "bun:test"
 import {
   orchestraConcurrencyError,
+  orchestraHandoffInstruction,
+  orchestraTaskAccessError,
   normalizeOrchestraRoleOutput,
-  orchestraHandoffSchema,
   parseModelString,
-  renderOrchestraHandoff,
   resolveFinalModel,
   validateOrchestraRoleOutput,
 } from "../../src/tool/model-override"
@@ -98,6 +98,85 @@ describe("validateOrchestraRoleOutput", () => {
     expect(validateOrchestraRoleOutput("orchestra-tester", `- STATUS: passed\n${tester}`)).toBeUndefined()
   })
 
+  it("accepts human-readable implementer headings with summary and files changed", () => {
+    const output = [
+      "STATUS: complete",
+      "SUMMARY: Closed the fixture drift finding.",
+      "FILES_CHANGED:",
+      "- tools/regenerate-binding-fixtures.mjs",
+      "- Enforces the exact owned fixture tree.",
+      "VALIDATION:",
+      "- pnpm curriculum:review-evidence:test - passed",
+      "RISKS:",
+      "- Existing unrelated worktree changes were preserved.",
+      "NEXT_ACTION:",
+      "- Lead can review the scoped change.",
+    ].join("\n")
+
+    expect(validateOrchestraRoleOutput("orchestra-implementer", output)).toBeUndefined()
+    expect(normalizeOrchestraRoleOutput("orchestra-implementer", output)).toBe(output)
+  })
+
+  it("accepts bounded aliases, Markdown headings, and field order variations", () => {
+    expect(
+      validateOrchestraRoleOutput(
+        "orchestra-reviewer",
+        [
+          "- **STATUS:** approved",
+          "## Checks",
+          "targeted tests passed",
+          "### Review Findings",
+          "none",
+          "NEXT STEPS: proceed to test",
+          "REMAINING-RISKS: none",
+        ].join("\n"),
+      ),
+    ).toBeUndefined()
+    expect(
+      validateOrchestraRoleOutput(
+        "orchestra-tester",
+        "STATUS: passed\nTESTS: suite passed\nTEST CHANGES: none\nFAILING TESTS: none\nNEXT ACTION: complete",
+      ),
+    ).toBeUndefined()
+  })
+
+  it("accepts CRLF, multiline values, and a final valid alias declaration", () => {
+    expect(
+      validateOrchestraRoleOutput(
+        "orchestra-implementer",
+        [
+          "STATUS: complete",
+          "CHANGES:",
+          "FILES_CHANGED:",
+          "- src/a.ts",
+          "- src/b.ts",
+          "VALIDATION: targeted tests passed",
+          "RISKS: none",
+          "NEXT_STEPS: review",
+        ].join("\r\n"),
+      ),
+    ).toBeUndefined()
+  })
+
+  it("keeps commands, URLs, Windows paths, and prose labels inside section content", () => {
+    expect(
+      validateOrchestraRoleOutput(
+        "orchestra-implementer",
+        [
+          "STATUS: complete",
+          "CHANGES: updated src/a.ts",
+          "VALIDATION:",
+          "Command: pnpm test:unit",
+          "URL: https://example.test/check",
+          "Path: C:\\workspace\\report.txt",
+          "Result: passed",
+          "RISKS: none",
+          "NEXT_ACTION: review",
+        ].join("\n"),
+      ),
+    ).toBeUndefined()
+  })
+
   it("rejects missing or invalid specialist status", () => {
     expect(validateOrchestraRoleOutput("orchestra-reviewer", "The code looks good.")).toContain("STATUS")
     expect(validateOrchestraRoleOutput("orchestra-tester", "STATUS: approved")).toContain("STATUS")
@@ -108,6 +187,99 @@ describe("validateOrchestraRoleOutput", () => {
         "STATUS: approved\nFINDINGS: mentioned in an example\nSTATUS: approved",
       ),
     ).toContain("FINDINGS")
+  })
+
+  it("rejects empty, summary-only, and unsupported substitute sections", () => {
+    expect(
+      validateOrchestraRoleOutput(
+        "orchestra-implementer",
+        "STATUS: complete\nCHANGES:\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review",
+      ),
+    ).toContain("CHANGES")
+    expect(
+      validateOrchestraRoleOutput(
+        "orchestra-implementer",
+        "STATUS: complete\nSUMMARY: changed files\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review",
+      ),
+    ).toContain("CHANGES")
+    expect(
+      validateOrchestraRoleOutput(
+        "orchestra-reviewer",
+        "STATUS: approved\nSUMMARY: looks good\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: test",
+      ),
+    ).toContain("FINDINGS")
+  })
+
+  it("rejects placeholders, punctuation-only values, and unknown-heading bleed", () => {
+    for (const changes of ["<text>", "...", "-", "TODO"]) {
+      expect(
+        validateOrchestraRoleOutput(
+          "orchestra-implementer",
+          `STATUS: complete\nCHANGES: ${changes}\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review`,
+        ),
+      ).toContain("CHANGES")
+    }
+    expect(
+      validateOrchestraRoleOutput(
+        "orchestra-implementer",
+        "STATUS: complete\nCHANGES:\nDETAILS: changed src/a.ts\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review",
+      ),
+    ).toContain("CHANGES")
+  })
+
+  it("uses only sections after the final status and lets the final duplicate declaration win", () => {
+    const validBeforeFinalStatus = [
+      "STATUS: complete",
+      "CHANGES: changed src/a.ts",
+      "VALIDATION: pass",
+      "RISKS: none",
+      "NEXT_ACTION: review",
+      "STATUS: complete",
+      "SUMMARY: no final fields",
+    ].join("\n")
+    expect(validateOrchestraRoleOutput("orchestra-implementer", validBeforeFinalStatus)).toContain("CHANGES")
+
+    const emptiedAtEnd = [
+      "STATUS: complete",
+      "CHANGES: changed src/a.ts",
+      "FILES_CHANGED:",
+      "VALIDATION: pass",
+      "RISKS: none",
+      "NEXT_ACTION: review",
+    ].join("\n")
+    expect(validateOrchestraRoleOutput("orchestra-implementer", emptiedAtEnd)).toContain("CHANGES")
+  })
+
+  it("ignores quoted and fenced protocol examples", () => {
+    const quoted = [
+      "> STATUS: complete",
+      "> CHANGES: changed src/a.ts",
+      "> VALIDATION: pass",
+      "> RISKS: none",
+      "> NEXT_ACTION: review",
+    ].join("\n")
+    expect(validateOrchestraRoleOutput("orchestra-implementer", quoted)).toContain("STATUS")
+
+    const fenced = [
+      "```text",
+      "STATUS: complete",
+      "CHANGES: changed src/a.ts",
+      "VALIDATION: pass",
+      "RISKS: none",
+      "NEXT_ACTION: review",
+      "```",
+    ].join("\n")
+    expect(validateOrchestraRoleOutput("orchestra-implementer", fenced)).toContain("STATUS")
+
+    const exampleThenFinal = [
+      fenced,
+      "STATUS: complete",
+      "FILES_CHANGED: src/a.ts",
+      "VALIDATION: pass",
+      "RISKS: none",
+      "NEXT_ACTION: review",
+    ].join("\n")
+    expect(validateOrchestraRoleOutput("orchestra-implementer", exampleThenFinal)).toBeUndefined()
   })
 
   it("leaves generic subagents unchanged", () => {
@@ -150,33 +322,12 @@ describe("validateOrchestraRoleOutput", () => {
   })
 })
 
-describe("orchestra structured handoff", () => {
-  it("builds and renders each role contract", () => {
-    expect(orchestraHandoffSchema("orchestra-reviewer")).toMatchObject({
-      required: ["status", "findings", "validation", "risks", "next_action"],
-    })
-    expect(
-      renderOrchestraHandoff("orchestra-reviewer", {
-        status: "approved",
-        findings: "none",
-        validation: "pass",
-        risks: "none",
-        next_action: "test",
-      }),
-    ).toBe("STATUS: approved\nFINDINGS: none\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: test")
-    expect(
-      renderOrchestraHandoff("orchestra-tester", {
-        status: "passed",
-        changes: "none",
-        validation: "pass",
-        failures: "none",
-        next_action: "complete",
-      }),
-    ).toContain("FAILURES: none")
-  })
-
-  it("rejects incomplete structured handoffs", () => {
-    expect(renderOrchestraHandoff("orchestra-implementer", { status: "complete" })).toBeUndefined()
+describe("orchestra handoff instruction", () => {
+  it("describes each role contract without provider-specific structured output", () => {
+    expect(orchestraHandoffInstruction("orchestra-implementer")).toContain("CHANGES")
+    expect(orchestraHandoffInstruction("orchestra-reviewer")).toContain("FINDINGS")
+    expect(orchestraHandoffInstruction("orchestra-tester")).toContain("FAILURES")
+    expect(orchestraHandoffInstruction("general")).toBeUndefined()
   })
 })
 
@@ -185,22 +336,29 @@ describe("orchestraConcurrencyError", () => {
     expect(orchestraConcurrencyError({ "orchestra-reviewer": 1 }, "orchestra-tester")).toBeUndefined()
   })
 
-  it("rejects a duplicate active role", () => {
-    expect(orchestraConcurrencyError({ "orchestra-implementer": 1 }, "orchestra-implementer")).toContain(
-      "already has an active task",
-    )
+  it("allows concurrent tasks with the same role below the total limit", () => {
+    expect(orchestraConcurrencyError({ "orchestra-reviewer": 3 }, "orchestra-reviewer")).toBeUndefined()
   })
 
-  it("rejects a fourth active specialist", () => {
+  it("allows four concurrent implementers", () => {
+    expect(orchestraConcurrencyError({ "orchestra-implementer": 3 }, "orchestra-implementer")).toBeUndefined()
+  })
+
+  it("rejects a fifth active implementer", () => {
     expect(
-      orchestraConcurrencyError(
-        {
-          "orchestra-implementer": 1,
-          "orchestra-reviewer": 1,
-          "orchestra-tester": 1,
-        },
-        "orchestra-tester",
-      ),
-    ).toContain("maximum 3")
+      orchestraConcurrencyError({ "orchestra-implementer": 4 }, "orchestra-implementer"),
+    ).toContain("maximum 4")
+  })
+})
+
+describe("orchestraTaskAccessError", () => {
+  it("keeps Orchestra specialists private to the Orchestra Lead", () => {
+    expect(orchestraTaskAccessError("orchestra", "orchestra-implementer")).toBeUndefined()
+    expect(orchestraTaskAccessError("orchestra", "orchestra-reviewer")).toBeUndefined()
+    expect(orchestraTaskAccessError("orchestra", "orchestra-tester")).toBeUndefined()
+    expect(orchestraTaskAccessError("build", "orchestra-implementer")).toContain("private Orchestra specialist")
+    expect(orchestraTaskAccessError("plan", "orchestra-reviewer")).toContain("private Orchestra specialist")
+    expect(orchestraTaskAccessError("build", "general")).toBeUndefined()
+    expect(orchestraTaskAccessError("orchestra", "general")).toContain("must delegate using")
   })
 })

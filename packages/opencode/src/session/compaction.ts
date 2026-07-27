@@ -384,7 +384,19 @@ const layer = Layer.effect(
       const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
+      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
+        stripMedia: true,
+        toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+        flattenTools: true,
+      })
+      const history = modelMessages.length
+        ? modelMessages
+        : [
+            {
+              role: "user" as const,
+              content: msgs.map(serialize).filter(Boolean).join("\n\n"),
+            },
+          ]
       const ctx = yield* InstanceState.context
       const msg: SessionV1.Assistant = {
         id: MessageID.ascending(),
@@ -413,32 +425,80 @@ const layer = Layer.effect(
         },
       }
       yield* session.updateMessage(msg)
-      const processor = yield* processors.create({
+      let processor = yield* processors.create({
         assistantMessage: msg,
         sessionID: input.sessionID,
         model,
       })
-      const result = yield* processor.process({
+      let result = yield* processor.process({
         user: userMessage,
         agent,
         sessionID: input.sessionID,
         tools: {},
         system: [],
         messages: [
+          ...history,
           {
             role: "user",
-            content: [
-              {
-                type: "text",
-                text: [nextPrompt, "The following is the conversation history:", conversation]
-                  .filter(Boolean)
-                  .join("\n\n"),
-              },
-            ],
+            content: [{ type: "text", text: nextPrompt }],
           },
         ],
         model,
       })
+
+      if (
+        processor.message.error &&
+        SessionV1.APIError.isInstance(processor.message.error) &&
+        `${model.providerID}/${model.id}` !== "opencode/big-pickle"
+      ) {
+        const fallback = yield* provider
+          .getModel(ProviderV2.ID.make("opencode"), ModelV2.ID.make("big-pickle"))
+          .pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+        if (fallback) {
+          const fallbackMessages = yield* MessageV2.toModelMessagesEffect(msgs, fallback, {
+            stripMedia: true,
+            toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+            flattenTools: true,
+          })
+          const fallbackMessage: SessionV1.Assistant = {
+            ...msg,
+            id: MessageID.ascending(),
+            modelID: fallback.id,
+            providerID: fallback.providerID,
+            cost: 0,
+            tokens: {
+              output: 0,
+              input: 0,
+              reasoning: 0,
+              cache: { read: 0, write: 0 },
+            },
+            error: undefined,
+            finish: undefined,
+            time: { created: Date.now() },
+          }
+          yield* session.updateMessage(fallbackMessage)
+          processor = yield* processors.create({
+            assistantMessage: fallbackMessage,
+            sessionID: input.sessionID,
+            model: fallback,
+          })
+          result = yield* processor.process({
+            user: userMessage,
+            agent,
+            sessionID: input.sessionID,
+            tools: {},
+            system: [],
+            messages: [
+              ...fallbackMessages,
+              {
+                role: "user",
+                content: [{ type: "text", text: nextPrompt }],
+              },
+            ],
+            model: fallback,
+          })
+        }
+      }
 
       if (result === "compact") {
         processor.message.error = new SessionV1.ContextOverflowError({

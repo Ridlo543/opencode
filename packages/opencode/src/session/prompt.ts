@@ -8,6 +8,7 @@ import { MessageV2 } from "./message-v2"
 import { SessionRevert } from "./revert"
 import { Session } from "./session"
 import { Agent } from "../agent/agent"
+import * as Delegation from "../agent/delegation"
 import { Provider } from "@/provider/provider"
 
 import { type Tool as AITool, tool, jsonSchema } from "ai"
@@ -145,7 +146,7 @@ const layer = Layer.effect(
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
         resolvePromptParts: (template: string) => resolvePromptParts(template),
-        prompt: (input: PromptInput) => prompt(input).pipe(Effect.catch(Effect.die)),
+        prompt: (input: PromptInput) => promptInternal(input, true).pipe(Effect.catch(Effect.die)),
       } satisfies TaskPromptOps
     })
 
@@ -480,6 +481,8 @@ const layer = Layer.effect(
               yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
               throw error
             }
+            const selectionError = Delegation.selectionError(session, agent.name)
+            if (selectionError) throw new Error(selectionError)
             const model = input.model ?? agent.model ?? (yield* currentModel(input.sessionID))
             const userMsg: SessionV1.User = {
               id: input.messageID ?? MessageID.ascending(),
@@ -646,7 +649,11 @@ const layer = Layer.effect(
       return yield* provider.defaultModel().pipe(Effect.orDie)
     })
 
-    const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
+    const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (
+      input: PromptInput,
+      delegated = false,
+      workflowTransition = false,
+    ) {
       const agentName = input.agent
       const ag = agentName ? yield* agents.get(agentName) : yield* agents.defaultInfo()
       if (!ag) {
@@ -656,6 +663,9 @@ const layer = Layer.effect(
         yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
         throw error
       }
+      const current = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      const selectionError = Delegation.selectionError(current, ag.name, delegated, workflowTransition)
+      if (selectionError) throw new Error(selectionError)
 
       const model = input.model ?? ag.model ?? (yield* currentModel(input.sessionID))
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
@@ -683,7 +693,6 @@ const layer = Layer.effect(
         format: input.format,
       }
 
-      const current = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       if (
         current.agent !== info.agent ||
         current.model?.providerID !== info.model.providerID ||
@@ -1063,12 +1072,14 @@ const layer = Layer.effect(
       return { info, parts }
     }, Effect.scoped)
 
-    const prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
-      "SessionPrompt.prompt",
-    )(function* (input: PromptInput) {
+    const promptInternal = Effect.fn("SessionPrompt.promptInternal")(function* (
+      input: PromptInput,
+      delegated = false,
+      workflowTransition = false,
+    ) {
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       yield* revert.cleanup(session)
-      const message = yield* createUserMessage(input)
+      const message = yield* createUserMessage(input, delegated, workflowTransition)
       yield* sessions.touch(input.sessionID)
 
       const permissions: PermissionV1.Rule[] = []
@@ -1083,6 +1094,9 @@ const layer = Layer.effect(
       if (input.noReply === true) return message
       return yield* loop({ sessionID: input.sessionID })
     })
+    const prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
+      "SessionPrompt.prompt",
+    )((input) => promptInternal(input, false))
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
       const match = yield* sessions.findMessage(sessionID, (m) => m.info.role !== "user").pipe(Effect.orDie)
@@ -1442,6 +1456,11 @@ const layer = Layer.effect(
         yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
         throw error
       }
+      const isSubtask = (agent.mode === "subagent" && cmd.subtask !== false) || cmd.subtask === true
+      const currentSession = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      const trustedOrchestraCommand = input.command === "orchestra" && cmd.agent === "orchestra"
+      const selectionError = Delegation.selectionError(currentSession, agent.name, false, trustedOrchestraCommand)
+      if (!isSubtask && selectionError) throw new Error(selectionError)
 
       const templateParts = yield* resolvePromptParts(template)
       const inputFiles = new Set(
@@ -1450,7 +1469,6 @@ const layer = Layer.effect(
       const uniqueTemplateParts = templateParts.filter(
         (part) => part.type !== "file" || !inputFiles.has(fileURLToPath(part.url)),
       )
-      const isSubtask = (agent.mode === "subagent" && cmd.subtask !== false) || cmd.subtask === true
       const parts = isSubtask
         ? [
             {
@@ -1477,14 +1495,14 @@ const layer = Layer.effect(
         { parts },
       )
 
-      const result = yield* prompt({
-        sessionID: input.sessionID,
-        messageID: input.messageID,
-        model: userModel,
-        agent: userAgent,
-        parts,
-        variant: input.variant,
-      })
+       const result = yield* promptInternal({
+         sessionID: input.sessionID,
+         messageID: input.messageID,
+         model: userModel,
+         agent: userAgent,
+         parts,
+         variant: input.variant,
+       }, false, trustedOrchestraCommand)
       yield* events.publish(Command.Event.Executed, {
         name: input.command,
         sessionID: input.sessionID,

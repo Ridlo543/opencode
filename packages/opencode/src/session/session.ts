@@ -5,6 +5,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "path"
 import { BackgroundJob } from "@/background/job"
+import * as Delegation from "@/agent/delegation"
 import { Decimal } from "decimal.js"
 import type { ProviderMetadata, Usage } from "@opencode-ai/llm"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -420,7 +421,8 @@ export interface Interface {
     title?: string
     agent?: string
     model?: Schema.Schema.Type<typeof Model>
-    metadata?: typeof Metadata.Type
+      metadata?: typeof Metadata.Type
+      internalMetadata?: typeof Metadata.Type
     permission?: PermissionV1.Ruleset
     workspaceID?: WorkspaceV2.ID
   }) => Effect.Effect<Info>
@@ -507,7 +509,8 @@ const layer: Layer.Layer<
       workspaceID?: WorkspaceV2.ID
       directory: string
       path?: string
-      metadata?: typeof Metadata.Type
+    metadata?: typeof Metadata.Type
+    internalMetadata?: typeof Metadata.Type
       permission?: PermissionV1.Ruleset
     }) {
       const ctx = yield* InstanceState.context
@@ -523,7 +526,10 @@ const layer: Layer.Layer<
         title: input.title ?? (input.parentID ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString(),
         agent: input.agent,
         model: input.model,
-        metadata: input.metadata,
+        metadata: {
+          ...Delegation.userMetadata(input.metadata),
+          ...Delegation.internalMetadata(input.internalMetadata),
+        },
         permission: input.permission ? [...input.permission] : undefined,
         cost: 0,
         tokens: EmptyTokens,
@@ -672,6 +678,7 @@ const layer: Layer.Layer<
       agent?: string
       model?: Schema.Schema.Type<typeof Model>
       metadata?: typeof Metadata.Type
+      internalMetadata?: typeof Metadata.Type
       permission?: PermissionV1.Ruleset
       workspaceID?: WorkspaceV2.ID
     }) {
@@ -685,6 +692,7 @@ const layer: Layer.Layer<
         agent: input?.agent,
         model: input?.model,
         metadata: input?.metadata,
+        internalMetadata: input?.internalMetadata,
         permission: input?.permission,
         workspaceID: input?.workspaceID ?? workspace,
       })
@@ -761,7 +769,14 @@ const layer: Layer.Layer<
     })
 
     const setMetadata = Effect.fn("Session.setMetadata")(function* (input: typeof SetMetadataInput.Type) {
-      yield* patch(input.sessionID, { metadata: input.metadata, time: { updated: Date.now() } }).pipe(Effect.orDie)
+      const current = yield* get(input.sessionID).pipe(Effect.orDie)
+      yield* patch(input.sessionID, {
+        metadata: {
+          ...Delegation.userMetadata(input.metadata),
+          ...Delegation.internalMetadata(current.metadata),
+        },
+        time: { updated: Date.now() },
+      }).pipe(Effect.orDie)
     })
 
     const setAgentModel = Effect.fn("Session.setAgentModel")(function* (input: {
