@@ -4,6 +4,8 @@
 
 import { describe, expect, it } from "bun:test"
 import {
+  ORCHESTRA_MAX_BLOCKED_ATTEMPTS,
+  orchestraBlockedRecovery,
   orchestraConcurrencyError,
   orchestraHandoffInstruction,
   orchestraTaskAccessError,
@@ -534,6 +536,23 @@ describe("orchestraConcurrencyError", () => {
     expect(
       orchestraConcurrencyError({ "orchestra-implementer": 4 }, "orchestra-implementer"),
     ).toContain("maximum 4")
+  })
+})
+
+describe("orchestraBlockedRecovery", () => {
+  it("provides distinct bounded recovery strategies through attempt five", () => {
+    const outputs = Array.from({ length: ORCHESTRA_MAX_BLOCKED_ATTEMPTS }, (_, index) =>
+      orchestraBlockedRecovery(index + 1),
+    )
+    expect(new Set(outputs).size).toBe(ORCHESTRA_MAX_BLOCKED_ATTEMPTS)
+    for (let index = 0; index < outputs.length; index++) {
+      expect(outputs[index]).toContain(`attempt ${index + 1} of 5`)
+      expect(outputs[index]).toContain("RECOVERY_STRATEGY:")
+    }
+    expect(outputs[0]).toContain("4 further implementer attempts remain")
+    expect(outputs[4]).toContain("Terminal for this phase")
+    expect(outputs[4]).toContain("do not start a sixth implementer attempt")
+    expect(orchestraBlockedRecovery(99)).toBe(outputs[4])
   })
 })
 

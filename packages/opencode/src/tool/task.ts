@@ -23,6 +23,8 @@ import {
   orchestraConcurrencyError,
   orchestraTaskAccessError,
   orchestraHandoffInstruction,
+  orchestraBlockedRecovery,
+  orchestraRoleStatus,
   normalizeOrchestraRoleOutput,
   resolveModelOverride,
   validateOrchestraRoleOutput,
@@ -136,6 +138,37 @@ export const TaskTool = Tool.define(
     const database = yield* Database.Service
     const provider = yield* Provider.Service
     const orchestraSlots = yield* SynchronizedRef.make(new Map<string, Record<string, number>>())
+    const orchestraBlockedAttempts = yield* SynchronizedRef.make(new Map<string, number>())
+
+    const applyOrchestraRecovery = Effect.fn("TaskTool.applyOrchestraRecovery")(function* (
+      parentID: SessionID,
+      role: string,
+      output: string,
+    ) {
+      if (role !== "orchestra-implementer") {
+        yield* SynchronizedRef.update(orchestraBlockedAttempts, (state) => {
+          const next = new Map(state)
+          next.delete(parentID)
+          return next
+        })
+        return output
+      }
+      const status = orchestraRoleStatus(role, output)
+      if (status === "complete") {
+        yield* SynchronizedRef.update(orchestraBlockedAttempts, (state) => {
+          const next = new Map(state)
+          next.delete(parentID)
+          return next
+        })
+        return output
+      }
+      if (status !== "blocked") return output
+      const attempt = yield* SynchronizedRef.modify(orchestraBlockedAttempts, (state) => {
+        const value = Math.min((state.get(parentID) ?? 0) + 1, 5)
+        return [value, new Map(state).set(parentID, value)] as const
+      })
+      return `${output}\n\n${orchestraBlockedRecovery(attempt)}`
+    })
 
     const reserveOrchestraSlot = Effect.fn("TaskTool.reserveOrchestraSlot")(function* (parentID: SessionID, role: string) {
       const error = yield* SynchronizedRef.modify(orchestraSlots, (slots) => {
@@ -363,7 +396,8 @@ export const TaskTool = Tool.define(
           .map((item) => item.text)
           .join("\n")
         const instruction = orchestraHandoffInstruction(next.name)
-        if (!instruction || !validateOrchestraRoleOutput(next.name, output)) return output
+        if (!instruction || !validateOrchestraRoleOutput(next.name, output))
+          return yield* applyOrchestraRecovery(ctx.sessionID, next.name, output)
 
         const evidence = handoffRepairEvidence(yield* sessions.messages({ sessionID: nextSession.id }))
         const repairSession = yield* sessions.create({
@@ -408,7 +442,8 @@ export const TaskTool = Tool.define(
             .filter((item): item is Extract<typeof item, { type: "text" }> => item.type === "text")
             .map((item) => item.text)
             .join("\n")
-          if (!validateOrchestraRoleOutput(next.name, rendered)) return rendered
+          if (!validateOrchestraRoleOutput(next.name, rendered))
+            return yield* applyOrchestraRecovery(ctx.sessionID, next.name, rendered)
         }
 
         const repairError =
@@ -419,12 +454,13 @@ export const TaskTool = Tool.define(
                 "message" in repair.value.info.error.data
               ? repair.value.info.error.data.message
               : undefined
-        return normalizeOrchestraRoleOutput(
+        const normalized = normalizeOrchestraRoleOutput(
           next.name,
           [output, repairError ? `Native handoff repair failed: ${repairError}` : "Native handoff repair returned no output."]
             .filter(Boolean)
             .join("\n"),
         )
+        return yield* applyOrchestraRecovery(ctx.sessionID, next.name, normalized)
       })
 
       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (

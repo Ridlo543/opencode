@@ -61,6 +61,7 @@ export function orchestraTaskAccessError(caller: string, target: string): string
 
 // Match the native task fan-out while allowing any mix of specialist roles.
 export const ORCHESTRA_MAX_CONCURRENT_TASKS = 4
+export const ORCHESTRA_MAX_BLOCKED_ATTEMPTS = 5
 
 export type OrchestraTaskCounts = Partial<Record<OrchestraRole, number>>
 
@@ -290,6 +291,31 @@ export function validateOrchestraRoleOutput(role: string, output: string): strin
   return `${role} must return a complete handoff with STATUS (${contract.statuses.join(", ")}) and fields ${contract.fields.join(", ")}.`
 }
 
+export function orchestraRoleStatus(role: string, output: string) {
+  const contract = orchestraContracts[role as OrchestraRole]
+  if (!contract || validateOrchestraRoleOutput(role, output)) return undefined
+  const status = finalHandoffStatus(output)?.status
+  return status && contract.statuses.includes(status) ? status : undefined
+}
+
+export function orchestraBlockedRecovery(attempt: number) {
+  const current = Math.min(Math.max(1, attempt), ORCHESTRA_MAX_BLOCKED_ATTEMPTS)
+  const strategies = [
+    "Inspect the actual diff and validation evidence, identify the concrete blocker, and make the next attempt address that blocker rather than redoing completed work.",
+    "Narrow the unresolved scope, preserve valid existing changes, and delegate a root-cause fix with exact acceptance criteria and validation commands.",
+    "Audit assumptions and interfaces around the blocker, then try a materially different implementation path instead of repeating the prior approach.",
+    "Use the strongest available evidence to choose the lowest-risk alternative, explicitly covering prior failure reasons and remaining validation gaps.",
+    "Stop implementation retries for this phase. Inspect the retained diff and report the root cause, viable implementation options, recommended option with rationale, exact unresolved work, and evidence needed to proceed.",
+  ]
+  return [
+    `ORCHESTRA_RECOVERY: blocked attempt ${current} of ${ORCHESTRA_MAX_BLOCKED_ATTEMPTS}`,
+    `RECOVERY_STRATEGY: ${strategies[current - 1]}`,
+    current === ORCHESTRA_MAX_BLOCKED_ATTEMPTS
+      ? "RETRY_POLICY: Terminal for this phase; do not start a sixth implementer attempt unless a later reviewer/tester transition establishes a new phase."
+      : `RETRY_POLICY: At most ${ORCHESTRA_MAX_BLOCKED_ATTEMPTS - current} further implementer attempts remain for this phase.`,
+  ].join("\n")
+}
+
 export function orchestraHandoffInstruction(role: string): string | undefined {
   const contract = orchestraContracts[role as OrchestraRole]
   if (!contract) return undefined
@@ -319,7 +345,7 @@ export function normalizeOrchestraRoleOutput(role: string, output: string): stri
       "REASON: invalid_handoff",
       "VALIDATION: The specialist task ended without a complete recognized handoff.",
       `RISKS: Raw specialist output follows:\n${raw}`,
-      "NEXT_ACTION: The Lead must inspect the raw output and resume the specialist once if useful.",
+      "NEXT_ACTION: The Lead must inspect the raw output and follow the task runtime's ORCHESTRA_RECOVERY strategy and retry policy.",
     ].join("\n")
   if (role === "orchestra-tester")
     return [
@@ -328,7 +354,7 @@ export function normalizeOrchestraRoleOutput(role: string, output: string): stri
       "REASON: invalid_handoff",
       "VALIDATION: The specialist task ended without a complete recognized handoff.",
       `FAILURES: Raw specialist output follows:\n${raw}`,
-      "NEXT_ACTION: The Lead must inspect the raw output and resume the specialist once if useful.",
+      "NEXT_ACTION: The Lead must inspect the raw output and follow the task runtime's ORCHESTRA_RECOVERY strategy and retry policy.",
     ].join("\n")
 
   return [
@@ -337,7 +363,7 @@ export function normalizeOrchestraRoleOutput(role: string, output: string): stri
     "REASON: invalid_handoff",
     "VALIDATION: The specialist task ended without a complete recognized handoff.",
     `RISKS: Raw specialist output follows:\n${raw}`,
-    "NEXT_ACTION: The Lead must inspect the raw output and resume the specialist once if useful.",
+    "NEXT_ACTION: The Lead must inspect the raw output and follow the task runtime's ORCHESTRA_RECOVERY strategy and retry policy.",
   ].join("\n")
 }
 

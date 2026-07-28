@@ -299,6 +299,15 @@ const layer = Layer.effect(
           item.mode = "subagent"
           item.hidden = true
         }
+        const orchestra = agents.orchestra
+        if (orchestra) {
+          orchestra.prompt = [
+            orchestra.prompt,
+            "Runtime recovery policy: an implementer STATUS: blocked is recoverable for at most five consecutive implementer attempts in one phase. Read the ORCHESTRA_RECOVERY, RECOVERY_STRATEGY, and RETRY_POLICY lines appended by the task runtime. Attempts 1-4 require a materially different recovery strategy that preserves valid work and addresses the concrete blocker. Attempt 5 is terminal for that phase: do not start a sixth implementer attempt; instead report root cause, viable implementation options, the recommended option with rationale, exact unresolved work, validation evidence, and what input or access is needed. A STATUS: complete or transition to reviewer/tester resets the blocked streak for the next phase. This runtime policy supersedes any earlier instruction that says to stop after only one fresh implementer attempt.",
+          ]
+            .filter(Boolean)
+            .join("\n\n")
+        }
 
         // Ensure Truncate.GLOB is allowed unless explicitly configured
         for (const name in agents) {

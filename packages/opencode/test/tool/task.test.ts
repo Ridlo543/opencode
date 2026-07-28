@@ -304,6 +304,132 @@ describe("tool.task", () => {
     },
   )
 
+  it.instance("tracks five blocked implementer attempts and resets after completion", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let complete = false
+      const context = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "orchestra",
+        abort: new AbortController().signal,
+        extra: {
+          promptOps: {
+            ...stubOps(),
+            prompt: (input: SessionPrompt.PromptInput) =>
+              Effect.succeed(
+                reply(
+                  input,
+                  complete
+                    ? "STATUS: complete\nCHANGES: fixed blocker\nVALIDATION: passed\nRISKS: none\nNEXT_ACTION: review"
+                    : "STATUS: blocked\nCHANGES: retained valid work\nVALIDATION: blocker reproduced\nRISKS: unresolved blocker\nNEXT_ACTION: retry differently",
+                ),
+              ),
+          } satisfies TaskPromptOps,
+        },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        const result = yield* def.execute(
+          {
+            description: `blocked attempt ${attempt}`,
+            prompt: "address the concrete blocker with a different strategy",
+            subagent_type: "orchestra-implementer",
+          },
+          context,
+        )
+        expect(result.output).toContain(`ORCHESTRA_RECOVERY: blocked attempt ${attempt} of 5`)
+        if (attempt === 5) expect(result.output).toContain("Terminal for this phase")
+      }
+
+      const clamped = yield* def.execute(
+        {
+          description: "blocked attempt six",
+          prompt: "this should remain terminal",
+          subagent_type: "orchestra-implementer",
+        },
+        context,
+      )
+      expect(clamped.output).toContain("blocked attempt 5 of 5")
+
+      complete = true
+      const success = yield* def.execute(
+        {
+          description: "complete recovery",
+          prompt: "complete the recovered implementation",
+          subagent_type: "orchestra-implementer",
+        },
+        context,
+      )
+      expect(success.output).not.toContain("ORCHESTRA_RECOVERY")
+
+      complete = false
+      const reset = yield* def.execute(
+        {
+          description: "new blocked phase",
+          prompt: "start the next phase",
+          subagent_type: "orchestra-implementer",
+        },
+        context,
+      )
+      expect(reset.output).toContain("blocked attempt 1 of 5")
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance("resets the blocked implementer streak on reviewer phase transition", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const execute = (role: "orchestra-implementer" | "orchestra-reviewer", output: string) =>
+        def.execute(
+          { description: "phase task", prompt: "perform phase work", subagent_type: role },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "orchestra",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ text: output }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+      const blocked = "STATUS: blocked\nCHANGES: retained work\nVALIDATION: blocked\nRISKS: unresolved\nNEXT_ACTION: retry"
+      expect((yield* execute("orchestra-implementer", blocked)).output).toContain("blocked attempt 1 of 5")
+      expect((yield* execute("orchestra-implementer", blocked)).output).toContain("blocked attempt 2 of 5")
+      const reviewer = yield* execute(
+        "orchestra-reviewer",
+        "STATUS: approved\nFINDINGS: none\nVALIDATION: passed\nRISKS: none\nNEXT_ACTION: test",
+      )
+      expect(reviewer.output).not.toContain("ORCHESTRA_RECOVERY")
+      expect((yield* execute("orchestra-implementer", blocked)).output).toContain("blocked attempt 1 of 5")
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": { mode: "subagent" },
+          "orchestra-reviewer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
   it.instance("repairs an empty orchestra handoff with one structured turn", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seedAgent("orchestra")
@@ -824,6 +950,25 @@ describe("tool.task", () => {
       config: {
         agent: {
           "orchestra-implementer": { mode: "primary", hidden: false },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "appends the five-attempt recovery policy to the Orchestra Lead prompt",
+    () =>
+      Effect.gen(function* () {
+        const agent = yield* Agent.Service
+        const orchestra = yield* agent.get("orchestra")
+        expect(orchestra.prompt).toContain("at most five consecutive implementer attempts")
+        expect(orchestra.prompt).toContain("ORCHESTRA_RECOVERY")
+        expect(orchestra.prompt).toContain("supersedes any earlier instruction")
+      }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary", prompt: "Legacy instruction: stop after one fresh attempt." },
         },
       },
     },
