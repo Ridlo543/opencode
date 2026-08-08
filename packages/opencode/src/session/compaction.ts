@@ -416,12 +416,12 @@ const layer = Layer.effect(
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
       const cfg = yield* config.get()
       const sessionInfo = yield* session.get(input.sessionID).pipe(Effect.orDie)
-      const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
-      const prior = completedCompactions(history)
+      const sessionHistory = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
+      const prior = completedCompactions(sessionHistory)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
       const previousSummary = prior.at(-1)?.summary
       const selected = yield* select({
-        messages: history.filter((_, index) => !hidden.has(index)),
+        messages: sessionHistory.filter((_, index) => !hidden.has(index)),
         cfg,
         model,
       })
@@ -436,19 +436,7 @@ const layer = Layer.effect(
         buildPrompt({ previousSummary, context: [...compacting.context, ...workflowCompactionContext(sessionInfo)] })
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
-        stripMedia: true,
-        toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-        flattenTools: true,
-      })
-      const history = modelMessages.length
-        ? modelMessages
-        : [
-            {
-              role: "user" as const,
-              content: msgs.map(serialize).filter(Boolean).join("\n\n"),
-            },
-          ]
+      const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
       const ctx = yield* InstanceState.context
       const msg: SessionV1.Assistant = {
         id: MessageID.ascending(),
@@ -489,10 +477,16 @@ const layer = Layer.effect(
         tools: {},
         system: [],
         messages: [
-          ...history,
           {
             role: "user",
-            content: [{ type: "text", text: nextPrompt }],
+            content: [
+              {
+                type: "text",
+                text: [nextPrompt, "The following is the conversation history:", conversation]
+                  .filter(Boolean)
+                  .join("\n\n"),
+              },
+            ],
           },
         ],
         model,
@@ -507,11 +501,7 @@ const layer = Layer.effect(
           .getModel(ProviderV2.ID.make("opencode"), ModelV2.ID.make("big-pickle"))
           .pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         if (fallback) {
-          const fallbackMessages = yield* MessageV2.toModelMessagesEffect(msgs, fallback, {
-            stripMedia: true,
-            toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-            flattenTools: true,
-          })
+          const fallbackConversation = msgs.map(serialize).filter(Boolean).join("\n\n")
           const fallbackMessage: SessionV1.Assistant = {
             ...msg,
             id: MessageID.ascending(),
@@ -541,10 +531,16 @@ const layer = Layer.effect(
             tools: {},
             system: [],
             messages: [
-              ...fallbackMessages,
               {
                 role: "user",
-                content: [{ type: "text", text: nextPrompt }],
+                content: [
+                  {
+                    type: "text",
+                    text: [nextPrompt, "The following is the conversation history:", fallbackConversation]
+                      .filter(Boolean)
+                      .join("\n\n"),
+                  },
+                ],
               },
             ],
             model: fallback,
