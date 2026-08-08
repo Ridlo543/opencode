@@ -1680,6 +1680,7 @@ export type PermissionConfig =
       lsp?: PermissionRuleConfig
       doom_loop?: PermissionActionConfig
       skill?: PermissionRuleConfig
+      model_override?: PermissionActionConfig
       [key: string]: PermissionRuleConfig | PermissionActionConfig | undefined
     }
 
@@ -1739,6 +1740,15 @@ export type ProviderConfig = {
   env?: Array<string>
   id?: string
   npm?: string
+  modelDiscovery?:
+    | boolean
+    | {
+        url?: string
+        headers?: {
+          [key: string]: string
+        }
+        timeout?: number
+      }
   whitelist?: Array<string>
   blacklist?: Array<string>
   options?: {
@@ -9332,6 +9342,34 @@ export type ProviderListResponses = {
 
 export type ProviderListResponse = ProviderListResponses[keyof ProviderListResponses]
 
+export type ProviderRefreshData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/provider/refresh"
+}
+
+export type ProviderRefreshErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ProviderRefreshError = ProviderRefreshErrors[keyof ProviderRefreshErrors]
+
+export type ProviderRefreshResponses = {
+  /**
+   * Provider models refreshed
+   */
+  200: boolean
+}
+
+export type ProviderRefreshResponse = ProviderRefreshResponses[keyof ProviderRefreshResponses]
+
 export type ProviderAuthData = {
   body?: never
   path?: never
@@ -9442,7 +9480,7 @@ export type SessionListData = {
   query?: {
     directory?: string
     workspace?: string
-    scope?: "project"
+    scope?: "project" | "global"
     path?: string
     roots?: boolean | "true" | "false"
     start?: number

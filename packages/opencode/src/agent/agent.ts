@@ -31,7 +31,7 @@ import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/l
 import { Reference } from "@opencode-ai/core/reference"
 import { Location } from "@opencode-ai/core/location"
 import { PluginV2 } from "@opencode-ai/core/plugin"
-import { isOrchestraRole } from "@/tool/model-override"
+import { isPrivateWorkflowAgent } from "@/tool/model-override"
 
 export const Info = Schema.Struct({
   name: Schema.String,
@@ -295,7 +295,7 @@ const layer = Layer.effect(
           item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))
         }
         for (const item of Object.values(agents)) {
-          if (!isOrchestraRole(item.name)) continue
+          if (!isPrivateWorkflowAgent(item.name)) continue
           item.mode = "subagent"
           item.hidden = true
         }
@@ -303,7 +303,7 @@ const layer = Layer.effect(
         if (orchestra) {
           orchestra.prompt = [
             orchestra.prompt,
-            "Runtime recovery policy: an implementer STATUS: blocked is recoverable for at most five consecutive implementer attempts in one phase. Read the ORCHESTRA_RECOVERY, RECOVERY_STRATEGY, and RETRY_POLICY lines appended by the task runtime. Attempts 1-4 require a materially different recovery strategy that preserves valid work and addresses the concrete blocker. Attempt 5 is terminal for that phase: do not start a sixth implementer attempt; instead report root cause, viable implementation options, the recommended option with rationale, exact unresolved work, validation evidence, and what input or access is needed. A STATUS: complete or transition to reviewer/tester resets the blocked streak for the next phase. This runtime policy supersedes any earlier instruction that says to stop after only one fresh implementer attempt.",
+            "Runtime recovery policy: an implementer STATUS: blocked is recoverable for at most five consecutive implementer attempts within one user chat turn. Read the ORCHESTRA_RECOVERY, RECOVERY_STRATEGY, and RETRY_POLICY lines appended by the task runtime. Attempts 1-4 require a materially different recovery strategy that preserves valid work and addresses the concrete blocker. Attempt 5 is terminal only for the current chat turn: do not start a sixth implementer attempt in that turn; instead report root cause, viable implementation options, the recommended option with rationale, exact unresolved work, validation evidence, and what input or access is needed. A new user message in the same session starts a fresh attempt budget. A STATUS: complete or transition to reviewer/tester resets the blocked streak within the current turn. This runtime policy supersedes any earlier instruction that says to stop after only one fresh implementer attempt.",
           ]
             .filter(Boolean)
             .join("\n\n")

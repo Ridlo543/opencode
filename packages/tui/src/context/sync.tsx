@@ -157,8 +157,8 @@ export const {
       hydratingSessions.get(sessionID)?.parts.add(partID)
     }
 
-    function sessionListQuery(): { scope?: "project"; path?: string } {
-      if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
+    function sessionListQuery(): { scope?: "project" | "global"; path?: string } {
+      if (!kv.get("session_directory_filter_enabled", true)) return { scope: "global" }
       if (!project.data.instance.path.worktree || !project.data.instance.path.directory) return { scope: "project" }
       return {
         path: path
@@ -168,8 +168,9 @@ export const {
     }
 
     function listSessions() {
+      const query = sessionListQuery()
       return sdk.client.session
-        .list({ start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() })
+        .list({ start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...query })
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 

@@ -45,7 +45,7 @@ import { Instruction } from "../session/instruction"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Agent } from "../agent/agent"
-import { orchestraTaskAccessError } from "./model-override"
+import { workflowTaskAccessError } from "./model-override"
 import { Skill } from "../skill"
 import { Permission } from "@/permission"
 import { BackgroundJob } from "@/background/job"
@@ -262,7 +262,7 @@ const layer = Layer.effect(
       const items = (yield* agents.list()).filter((item) => item.mode !== "primary")
       const filtered = items.filter(
         (item) =>
-          !orchestraTaskAccessError(agent.name, item.name) &&
+          !workflowTaskAccessError(agent.name, item.name) &&
           Permission.evaluate("task", item.name, agent.permission).action !== "deny",
       )
       const list = filtered.toSorted((a, b) => a.name.localeCompare(b.name))

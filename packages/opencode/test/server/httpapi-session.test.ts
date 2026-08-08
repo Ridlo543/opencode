@@ -881,6 +881,34 @@ describe("session HttpApi", () => {
   )
 
   it.instance(
+    "lists root sessions across projects only when global scope is requested",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const other = yield* tmpdirScoped({ git: true })
+        const localSession = yield* createSession()
+        const store = yield* InstanceStore.Service
+        const otherSession = yield* store.provide(
+          { directory: other },
+          createSession().pipe(Effect.provideService(TestInstance, { directory: other })),
+        )
+        const headers = { "x-opencode-directory": test.directory }
+
+        const local = yield* requestJson<Session.Info[]>(`${SessionPaths.list}?roots=true`, { headers })
+        expect(local.map((item) => item.id)).toContain(localSession.id)
+        expect(local.map((item) => item.id)).not.toContain(otherSession.id)
+
+        const global = yield* requestJson<Session.GlobalInfo[]>(`${SessionPaths.list}?roots=true&scope=global`, {
+          headers,
+        })
+        expect(global.map((item) => item.id)).toContain(localSession.id)
+        expect(global.map((item) => item.id)).toContain(otherSession.id)
+        expect(global.find((item) => item.id === otherSession.id)?.directory).toBe(other)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
     "lists sessions created through an equivalent directory hint",
     () =>
       Effect.gen(function* () {

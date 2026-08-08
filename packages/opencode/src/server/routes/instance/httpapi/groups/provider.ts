@@ -45,6 +45,16 @@ export const ProviderApi = HttpApi.make("provider")
             description: "Get a list of all available AI providers, including both available and connected ones.",
           }),
         ),
+        HttpApiEndpoint.post("refresh", `${root}/refresh`, {
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Boolean, "Provider models refreshed"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "provider.refresh",
+            summary: "Refresh provider models",
+            description: "Invalidate the provider cache and rediscover configured provider models.",
+          }),
+        ),
         HttpApiEndpoint.get("auth", `${root}/auth`, {
           query: WorkspaceRoutingQuery,
           success: described(ProviderAuth.Methods, "Provider auth methods"),

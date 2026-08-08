@@ -19,6 +19,14 @@ describe("dialog session list", () => {
     })
   })
 
+  test("requests global root sessions when cross-directory filtering is disabled", () => {
+    expect(createDialogSessionListQuery({ filter: { scope: "global" } })).toEqual({
+      roots: true,
+      limit: 100,
+      scope: "global",
+    })
+  })
+
   test("keeps the cache usable while the root request is pending", async () => {
     let resolve!: (result: { data: string[] }) => void
     const pending = loadDialogSessionList<string>({

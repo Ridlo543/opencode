@@ -73,6 +73,20 @@ describe("session.listGlobal", () => {
   )
 
   it.instance(
+    "excludes archived sessions from the project list",
+    () =>
+      Effect.gen(function* () {
+        const archived = yield* withSession({ title: "archived-project-session" })
+
+        yield* SessionNs.Service.use((session) => session.setArchived({ sessionID: archived.id, time: Date.now() }))
+
+        const sessions = yield* SessionNs.Service.use((session) => session.list({ limit: 200 }))
+        expect(sessions.map((session) => session.id)).not.toContain(archived.id)
+      }),
+    { git: true },
+  )
+
+  it.instance(
     "supports cursor pagination",
     () =>
       Effect.gen(function* () {

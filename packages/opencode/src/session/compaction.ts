@@ -22,6 +22,8 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { buildPrompt } from "@opencode-ai/core/session/compaction"
 import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-event"
+import { isOrchestraLead, isOrchestraPrivateAgent, isResearchRole } from "@/tool/model-override"
+import * as Delegation from "@/agent/delegation"
 
 export const Event = SessionCompactionEvent
 
@@ -93,6 +95,53 @@ function summaryText(message: SessionV1.WithParts) {
     .join("\n\n")
     .trim()
   return text || undefined
+}
+
+export function workflowCompactionContext(info: Session.Info) {
+  const agent = info.agent
+  if (!agent) return []
+  const context: string[] = []
+  if (isOrchestraLead(agent)) {
+    const ledger = info.metadata?.["opencode.orchestra.workflow"]
+    context.push(
+      [
+        "<orchestra-workflow-state>",
+        "Preserve this durable runtime state accurately in the summary. Delegation counters are observations, never retry limits.",
+        JSON.stringify(ledger ?? { phase: "planning", releaseReady: false }),
+        "</orchestra-workflow-state>",
+      ].join("\n"),
+    )
+  }
+  if (isOrchestraPrivateAgent(agent)) {
+    const provenance = Delegation.internalMetadata(info.metadata)
+    context.push(
+      [
+        "<delegated-orchestra-role>",
+        `Role: ${agent}. Parent session: ${info.parentID ?? "unknown"}.`,
+        `Delegation provenance: ${JSON.stringify(provenance ?? {})}`,
+        "Preserve completed changes, validation evidence, unresolved work, and the original scope. After compaction, continue the same task and finish with the role's required substantive handoff and STATUS when work reaches a safe stopping point. Do not restart completed work or change ownership.",
+        "</delegated-orchestra-role>",
+      ].join("\n"),
+    )
+  }
+  if (agent === "research") {
+    context.push(
+      "<research-lead-state>Preserve the protocol, evidence ledger, source provenance, unresolved methodological decisions, specialist handoffs, manuscript state, and exact next action. After compaction, continue the current research workflow without restarting completed phases.</research-lead-state>",
+    )
+  }
+  if (isResearchRole(agent)) {
+    const provenance = Delegation.internalMetadata(info.metadata)
+    context.push(
+      [
+        "<delegated-research-role>",
+        `Role: ${agent}. Parent session: ${info.parentID ?? "unknown"}.`,
+        `Delegation provenance: ${JSON.stringify(provenance ?? {})}`,
+        "Preserve sources, exact evidence locations, methods, outputs already written, validation, limitations, unresolved work, and the original lane. After compaction, continue the same assignment and finish with the role's required substantive handoff. Do not restart completed work or assume another role's authority.",
+        "</delegated-research-role>",
+      ].join("\n"),
+    )
+  }
+  return context
 }
 
 function completedCompactions(messages: SessionV1.WithParts[]) {
@@ -366,6 +415,7 @@ const layer = Layer.effect(
         ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
       const cfg = yield* config.get()
+      const sessionInfo = yield* session.get(input.sessionID).pipe(Effect.orDie)
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
@@ -381,7 +431,9 @@ const layer = Layer.effect(
         { sessionID: input.sessionID },
         { context: [], prompt: undefined },
       )
-      const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
+      const nextPrompt =
+        compacting.prompt ??
+        buildPrompt({ previousSummary, context: [...compacting.context, ...workflowCompactionContext(sessionInfo)] })
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
       const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
@@ -581,7 +633,11 @@ const layer = Layer.effect(
               (input.overflow
                 ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
                 : "") +
-              "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+              (isOrchestraPrivateAgent(userMessage.agent) || isResearchRole(userMessage.agent)
+                ? "Continue the same delegated assignment from the compacted state. Preserve completed work, do not restart the task, use tools only for unresolved work, and finish with the role's required substantive handoff."
+                : isOrchestraLead(userMessage.agent) || userMessage.agent === "research"
+                  ? "Continue the current workflow from the compacted state. Reconcile durable workflow/evidence state, preserve completed phases, and take the next evidence-based action; ask only if a genuine user decision or unavailable input blocks progress."
+                  : "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.")
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: continueMsg.id,

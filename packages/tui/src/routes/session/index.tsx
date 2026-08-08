@@ -1727,7 +1727,8 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
 
   const toolprops = {
     get metadata() {
-      return props.part.state.status === "pending" ? {} : (props.part.state.metadata ?? {})
+      const stateMetadata = props.part.state.status === "pending" ? undefined : props.part.state.metadata
+      return { ...(props.part.metadata ?? {}), ...(stateMetadata ?? {}) }
     },
     get input() {
       return props.part.state.input ?? {}
@@ -1907,7 +1908,7 @@ function InlineTool(props: {
       onMouseOut={() => setHover(false)}
       onMouseUp={() => {
         if (renderer.getSelection()?.getSelectedText()) return
-        if (failed()) {
+        if (failed() && !props.onClick) {
           setErrorExpanded((value) => !value)
           return
         }
@@ -2232,11 +2233,11 @@ function Task(props: ToolProps) {
   const dialog = useDialog()
 
   onMount(() => {
-    const sessionID = stringValue(props.metadata.sessionId)
+    const sessionID = stringValue(props.metadata.sessionId) ?? stringValue(props.metadata.sessionID)
     if (sessionID && !sync.data.message[sessionID]?.length) void sync.session.sync(sessionID)
   })
 
-  const sessionID = createMemo(() => stringValue(props.metadata.sessionId))
+  const sessionID = createMemo(() => stringValue(props.metadata.sessionId) ?? stringValue(props.metadata.sessionID))
   const messages = createMemo(() => sync.data.message[sessionID() ?? ""] ?? [])
 
   const tools = createMemo(() => {

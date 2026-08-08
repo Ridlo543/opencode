@@ -932,6 +932,24 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         },
       },
       {
+        name: "app.refresh.provider_models",
+        title: "Refresh provider models",
+        category: "System",
+        run: async () => {
+          dialog.clear()
+          try {
+            await sdk.client.provider.refresh({}, { throwOnError: true })
+            await sync.bootstrap({ fatal: false })
+            toast.show({ message: "Provider models refreshed", variant: "success" })
+          } catch (error) {
+            toast.show({
+              message: error instanceof Error ? error.message : "Failed to refresh provider models",
+              variant: "error",
+            })
+          }
+        },
+      },
+      {
         name: "app.toggle.session_directory_filter",
         title: kv.get("session_directory_filter_enabled", true)
           ? "Disable session directory filtering"

@@ -42,19 +42,63 @@ export type ModelOverrideResult =
   | { success: false; error: string }
 
 export type OrchestraRole = "orchestra-implementer" | "orchestra-reviewer" | "orchestra-tester"
+export const ORCHESTRA_ASSISTANT = "orchestra-assistant-specialist"
+export const ORCHESTRA_LEAD = "orchestra"
+export const ORCHESTRA_CUSTOM_LEAD = "orchestra-custom"
+export type OrchestraDelegate = OrchestraRole | typeof ORCHESTRA_ASSISTANT
 const orchestraRoles = new Set<string>(["orchestra-implementer", "orchestra-reviewer", "orchestra-tester"])
+export const RESEARCH_ROLES = [
+  "research-methodologist",
+  "research-scout",
+  "research-analyst",
+  "research-critic",
+  "research-writer",
+  "research-reviewer",
+  "research-editor",
+] as const
+export type ResearchRole = (typeof RESEARCH_ROLES)[number]
+const researchRoles = new Set<string>(RESEARCH_ROLES)
 
 export function isOrchestraRole(agent: string): agent is OrchestraRole {
   return orchestraRoles.has(agent)
 }
 
-export function orchestraTaskAccessError(caller: string, target: string): string | undefined {
-  if (caller === "orchestra") {
-    if (isOrchestraRole(target)) return undefined
-    return `The orchestra Lead must delegate using orchestra-implementer, orchestra-reviewer, or orchestra-tester; received ${target}.`
+export function isOrchestraPrivateAgent(agent: string): agent is OrchestraDelegate {
+  return isOrchestraRole(agent) || agent === ORCHESTRA_ASSISTANT
+}
+
+export function isOrchestraLead(agent: string) {
+  return agent === ORCHESTRA_LEAD || agent === ORCHESTRA_CUSTOM_LEAD
+}
+
+export function isResearchRole(agent: string): agent is ResearchRole {
+  return researchRoles.has(agent)
+}
+
+export function isPrivateWorkflowAgent(agent: string): agent is OrchestraDelegate | ResearchRole {
+  return isOrchestraPrivateAgent(agent) || isResearchRole(agent)
+}
+
+export function workflowTaskAccessError(caller: string, target: string): string | undefined {
+  if (isOrchestraLead(caller)) {
+    if (isOrchestraPrivateAgent(target)) return undefined
+    return `The orchestra Lead must delegate using orchestra-assistant-specialist, orchestra-implementer, orchestra-reviewer, or orchestra-tester; received ${target}.`
   }
-  if (isOrchestraRole(target)) {
+  if (caller === "research") {
+    if (isResearchRole(target)) return undefined
+    return `The Research Lead must delegate using ${RESEARCH_ROLES.join(", ")}; received ${target}.`
+  }
+  if (isOrchestraPrivateAgent(caller)) {
+    return `${caller} cannot delegate tasks; only the orchestra Lead owns delegation and workflow routing.`
+  }
+  if (isResearchRole(caller)) {
+    return `${caller} cannot delegate tasks; only the Research Lead owns delegation and workflow routing.`
+  }
+  if (isOrchestraPrivateAgent(target)) {
     return `${target} is a private Orchestra specialist and can only be delegated by the orchestra Lead.`
+  }
+  if (isResearchRole(target)) {
+    return `${target} is a private Research specialist and can only be delegated by the Research Lead.`
   }
   return undefined
 }
@@ -63,131 +107,43 @@ export function orchestraTaskAccessError(caller: string, target: string): string
 export const ORCHESTRA_MAX_CONCURRENT_TASKS = 4
 export const ORCHESTRA_MAX_BLOCKED_ATTEMPTS = 5
 
-export type OrchestraTaskCounts = Partial<Record<OrchestraRole, number>>
-
-const handoffAliases = {
-  CHANGES: [
-    "FILES_CHANGED",
-    "CHANGED_FILES",
-    "FILES_MODIFIED",
-    "MODIFIED_FILES",
-    "IMPLEMENTATION",
-    "IMPLEMENTATION_SUMMARY",
-    "MODIFICATIONS",
-    "WORK_COMPLETED",
-  ],
-  VALIDATION: [
-    "TESTS",
-    "TESTS_RUN",
-    "TEST_RESULTS",
-    "TESTING",
-    "CHECKS",
-    "CHECKS_RUN",
-    "CHECK_RESULTS",
-    "COMMANDS_RUN",
-    "VERIFICATION",
-    "VERIFICATION_RESULTS",
-    "VALIDATION_RESULTS",
-  ],
-  RISKS: ["KNOWN_RISKS", "REMAINING_RISKS", "RESIDUAL_RISKS"],
-  NEXT_ACTION: ["NEXT_ACTIONS", "NEXT_STEP", "NEXT_STEPS", "FOLLOW_UP", "FOLLOW_UP_ACTIONS"],
-  FINDINGS: ["ISSUES", "ISSUES_FOUND", "REVIEW_FINDINGS", "REVIEW_RESULTS"],
-  FAILURES: ["FAILED_TESTS", "FAILING_TESTS", "TEST_FAILURES", "TEST_ISSUES"],
-} as const
+export type OrchestraTaskCounts = Partial<Record<OrchestraDelegate, number>>
 
 const orchestraContracts = {
   "orchestra-implementer": {
     statuses: ["complete", "blocked"],
     fields: ["CHANGES", "VALIDATION", "RISKS", "NEXT_ACTION"],
-    aliases: {
-      CHANGES: handoffAliases.CHANGES,
-      VALIDATION: handoffAliases.VALIDATION,
-      RISKS: handoffAliases.RISKS,
-      NEXT_ACTION: handoffAliases.NEXT_ACTION,
-    },
   },
   "orchestra-reviewer": {
     statuses: ["approved", "needs_revision", "blocked"],
     fields: ["FINDINGS", "VALIDATION", "RISKS", "NEXT_ACTION"],
-    aliases: {
-      FINDINGS: handoffAliases.FINDINGS,
-      VALIDATION: handoffAliases.VALIDATION,
-      RISKS: handoffAliases.RISKS,
-      NEXT_ACTION: handoffAliases.NEXT_ACTION,
-    },
   },
   "orchestra-tester": {
     statuses: ["passed", "failed", "blocked"],
     fields: ["CHANGES", "VALIDATION", "FAILURES", "NEXT_ACTION"],
-    aliases: {
-      CHANGES: [...handoffAliases.CHANGES, "TEST_CHANGES", "TESTS_ADDED"],
-      VALIDATION: handoffAliases.VALIDATION,
-      FAILURES: handoffAliases.FAILURES,
-      NEXT_ACTION: handoffAliases.NEXT_ACTION,
-    },
   },
-} satisfies Record<
-  OrchestraRole,
-  { statuses: string[]; fields: string[]; aliases: Record<string, readonly string[]> }
->
+} satisfies Record<OrchestraRole, { statuses: string[]; fields: string[] }>
 
-function normalizeHandoffHeading(value: string) {
-  return value
-    .replace(/^[\s#>*-]+/, "")
-    .replace(/[*`~]/g, "")
-    .trim()
-    .replace(/[\s-]+/g, "_")
-    .toUpperCase()
-}
+const orchestraSuccessStatuses = new Set(["complete", "approved", "passed"])
 
-function parseHandoffSections(output: string, canonical: Map<string, string>) {
-  const sections = new Map<string, string[]>()
-  const structural = new Map<string, string[]>()
-  let current: string | undefined
-  let currentStructural: string | undefined
-  let fence: string | undefined
-  for (const line of output.split(/\r?\n/)) {
-    const fenceMatch = line.match(/^\s*(```+|~~~+)/)
-    if (fenceMatch) {
-      fence = fence ? undefined : fenceMatch[1]?.[0]
+const evidenceHeadingPattern =
+  /^\s*(?:[#*-]+\s*)?(?:(?:VALIDATION|VALIDATION_RESULTS|VERIFICATION|VERIFICATION_RESULTS|TESTS|TESTS_RUN|TEST_RESULTS|TESTING|CHECKS|CHECKS_RUN|CHECK_RESULTS|COMMANDS_RUN|EVIDENCE|PROOF_OF_CHECKS|BUKTI_VALIDASI|CONFIDENCE_EVIDENCE|QUALITY_GATES|RESULT|RESULTS)\s*:|(?:checks|review findings|quality gates|validation|verification|evidence|proof)\s*$)/i
+
+function hasGroundedEvidence(body: string) {
+  const lines = body.split(/\r?\n/)
+  let sawHeading = false
+  for (const raw of lines) {
+    const line = raw.replace(/^\s*[-*+]\s*/, "").trim()
+    if (!line) continue
+    if (evidenceHeadingPattern.test(line)) {
+      sawHeading = true
+      const value = line.replace(evidenceHeadingPattern, "").trim()
+      if (hasMeaningfulHandoffValue([value])) return true
       continue
     }
-    if (fence || /^\s*>/.test(line)) continue
-    const match = line.match(/^\s*(?:[#[*-]+\s*)?(?:[*_`~]+\s*)?([A-Za-z][A-Za-z _-]*?)(?:\s*[*_`~]+)?\s*(?::\s*(.*))?$/)
-    const rawHeading = match?.[1]?.trim() ?? ""
-    const heading = normalizeHandoffHeading(rawHeading)
-    const field = canonical.get(heading)
-    const markdownHeading = /^\s*#{1,6}\s+/.test(line)
-    const bullet = /^\s*[-*+]\s+/.test(line)
-    const explicit = line.includes(":") || markdownHeading
-    const protocolHeading = rawHeading === rawHeading.toUpperCase()
-    const structuralHeading = explicit && (markdownHeading || (!bullet && protocolHeading))
-    if (match && field && explicit) {
-      current = field
-      currentStructural = heading
-      const value = match[2]?.trim()
-      // Canonical and alias duplicates are one section; the final declaration wins.
-      sections.set(field, value ? [value] : [])
-      structural.set(heading, value ? [value] : [])
-      continue
-    }
-    if (match && structuralHeading) {
-      current = undefined
-      currentStructural = heading
-      const value = match[2]?.trim()
-      structural.set(heading, value ? [value] : [])
-      continue
-    }
-    // An explicit unknown heading must not become content for the preceding field.
-    if (match && (markdownHeading || (line.includes(":") && !bullet && protocolHeading))) {
-      current = undefined
-      currentStructural = undefined
-      continue
-    }
-    if (current && line.trim()) sections.get(current)?.push(line.trim())
-    if (currentStructural && line.trim()) structural.get(currentStructural)?.push(line.trim())
+    if (sawHeading && /passed|succeeded|success|ok\b|fail(?:ed|ure)?|error|command|test|check|result|exit/i.test(line)) return true
   }
-  return { canonical: sections, structural }
+  return false
 }
 
 function finalHandoffStatus(output: string) {
@@ -225,31 +181,8 @@ function hasMeaningfulHandoffValue(lines: string[] | undefined) {
   return !/^(?:<\s*(?:text|value|todo)\s*>|\.{2,}|tbd|todo)$/i.test(value)
 }
 
-const supplementaryHandoffSections = new Set([
-  "SUMMARY",
-  "NOTES",
-  "SCOPE",
-  "CONTEXT",
-  "DESIGN_INVARIANTS",
-  "ASSUMPTIONS",
-  "DETAILS",
-])
-
-function hasStructuralHandoff(sections: Map<string, string[]>) {
-  const evidence = [...sections.entries()].filter(
-    ([heading, lines]) => !supplementaryHandoffSections.has(heading) && hasMeaningfulHandoffValue(lines),
-  )
-  if (evidence.length < 4) return false
-  const content = evidence
-    .flatMap(([, lines]) => lines)
-    .join("\n")
-    .replace(/^\s*[-*+]\s*/gm, "")
-    .trim()
-  return content.length >= 40
-}
-
 export function orchestraConcurrencyError(counts: OrchestraTaskCounts, role: string): string | undefined {
-  if (!isOrchestraRole(role)) return undefined
+  if (!isOrchestraPrivateAgent(role)) return undefined
 
   const total = Object.values(counts).reduce((sum, value) => sum + (value ?? 0), 0)
   if (total >= ORCHESTRA_MAX_CONCURRENT_TASKS) {
@@ -260,8 +193,8 @@ export function orchestraConcurrencyError(counts: OrchestraTaskCounts, role: str
 }
 
 /**
- * Require the structured status contract for configured orchestra specialists.
- * Generic subagents keep the existing free-form output behavior.
+ * Require a valid role status and substantive handoff body. Suggested headings
+ * improve interoperability but must not override readable specialist evidence.
  */
 export function validateOrchestraRoleOutput(role: string, output: string): string | undefined {
   const contract = orchestraContracts[role as OrchestraRole]
@@ -272,23 +205,14 @@ export function validateOrchestraRoleOutput(role: string, output: string): strin
   const final = finalHandoffStatus(output)
   const status = final?.status
   const handoff = final?.handoff ?? ""
-  const canonical = new Map<string, string>()
-  const aliases = contract.aliases as Record<string, readonly string[]>
-  for (const field of contract.fields) {
-    canonical.set(field, field)
-    for (const alias of aliases[field] ?? []) canonical.set(alias, field)
+  const meaningful = hasMeaningfulHandoffValue([handoff]) && handoff.replace(/^\s*[-*+]\s*/gm, "").trim().length >= 40
+  if (!status || !contract.statuses.includes(status) || !meaningful) {
+    return `${role} must return STATUS (${contract.statuses.join(", ")}) followed by a substantive handoff. Suggested fields: ${contract.fields.join(", ")}.`
   }
-  // SUMMARY is useful context but deliberately not a substitute for role evidence.
-  canonical.set("SUMMARY", "SUMMARY")
-  const sections = parseHandoffSections(handoff, canonical)
-  const complete = contract.fields.every((field) => hasMeaningfulHandoffValue(sections.canonical.get(field)))
-  const canonicalConsistent = contract.fields
-    .filter((field) => sections.canonical.has(field))
-    .every((field) => hasMeaningfulHandoffValue(sections.canonical.get(field)))
-  const structural = canonicalConsistent && hasStructuralHandoff(sections.structural)
-  if (status && contract.statuses.includes(status) && (complete || structural)) return undefined
-
-  return `${role} must return a complete handoff with STATUS (${contract.statuses.join(", ")}) and fields ${contract.fields.join(", ")}.`
+  if (orchestraSuccessStatuses.has(status) && !hasGroundedEvidence(handoff)) {
+    return `${role} must ground a success status (${status}) in concrete validation or observed execution evidence; a human-readable result is sufficient, but a status alone is not.`
+  }
+  return undefined
 }
 
 export function orchestraRoleStatus(role: string, output: string) {
@@ -305,14 +229,14 @@ export function orchestraBlockedRecovery(attempt: number) {
     "Narrow the unresolved scope, preserve valid existing changes, and delegate a root-cause fix with exact acceptance criteria and validation commands.",
     "Audit assumptions and interfaces around the blocker, then try a materially different implementation path instead of repeating the prior approach.",
     "Use the strongest available evidence to choose the lowest-risk alternative, explicitly covering prior failure reasons and remaining validation gaps.",
-    "Stop implementation retries for this phase. Inspect the retained diff and report the root cause, viable implementation options, recommended option with rationale, exact unresolved work, and evidence needed to proceed.",
+    "Stop implementation retries for this chat turn. Inspect the retained diff and report the root cause, viable implementation options, recommended option with rationale, exact unresolved work, and evidence needed to proceed.",
   ]
   return [
     `ORCHESTRA_RECOVERY: blocked attempt ${current} of ${ORCHESTRA_MAX_BLOCKED_ATTEMPTS}`,
     `RECOVERY_STRATEGY: ${strategies[current - 1]}`,
     current === ORCHESTRA_MAX_BLOCKED_ATTEMPTS
-      ? "RETRY_POLICY: Terminal for this phase; do not start a sixth implementer attempt unless a later reviewer/tester transition establishes a new phase."
-      : `RETRY_POLICY: At most ${ORCHESTRA_MAX_BLOCKED_ATTEMPTS - current} further implementer attempts remain for this phase.`,
+      ? "RETRY_POLICY: Terminal for this chat turn; do not start a sixth implementer attempt. A new user message starts a fresh attempt budget in the same session."
+      : `RETRY_POLICY: At most ${ORCHESTRA_MAX_BLOCKED_ATTEMPTS - current} further implementer attempts remain for this chat turn.`,
   ].join("\n")
 }
 
@@ -322,7 +246,9 @@ export function orchestraHandoffInstruction(role: string): string | undefined {
 
   return [
     `First line: STATUS: one of ${contract.statuses.join(", ")}`,
-    ...contract.fields.map((field) => `Required field: ${field}: <text>`),
+    "Then provide a substantive, readable handoff. The headings below are recommended but not required when equivalent information is clear:",
+    ...contract.fields.map((field) => `Suggested field: ${field}: <text>`),
+    `Success statuses (${[...orchestraSuccessStatuses].join(", ")}) require a concrete validation or execution result, such as the exact command and observed outcome. Never claim success from an intended patch, an unexecuted test, or a summary alone.`,
   ].join("\n")
 }
 

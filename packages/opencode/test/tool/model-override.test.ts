@@ -8,7 +8,8 @@ import {
   orchestraBlockedRecovery,
   orchestraConcurrencyError,
   orchestraHandoffInstruction,
-  orchestraTaskAccessError,
+  isOrchestraLead,
+  workflowTaskAccessError,
   normalizeOrchestraRoleOutput,
   parseModelString,
   resolveFinalModel,
@@ -117,6 +118,21 @@ describe("validateOrchestraRoleOutput", () => {
 
     expect(validateOrchestraRoleOutput("orchestra-implementer", output)).toBeUndefined()
     expect(normalizeOrchestraRoleOutput("orchestra-implementer", output)).toBe(output)
+  })
+
+  it("accepts a substantive reviewer finding without every suggested heading", () => {
+    const output = [
+      "STATUS: needs_revision",
+      "SUMMARY:",
+      "The prior root findings are addressed, but one begin/completion race violates completed replay semantics.",
+      "FINDINGS:",
+      "- MEDIUM — A duplicate request racing successful completion can return ErrUnavailable instead of the committed replay.",
+      "Evidence: begin checks for a result before locking the claim. Completion can insert the result and delete the claim while begin waits, so begin resumes without rechecking the committed result.",
+      "After a missing claim, begin should recheck for a committed result before failing and add a deterministic concurrency test.",
+    ].join("\n")
+
+    expect(validateOrchestraRoleOutput("orchestra-reviewer", output)).toBeUndefined()
+    expect(normalizeOrchestraRoleOutput("orchestra-reviewer", output)).toBe(output)
   })
 
   it("accepts long-form implementer reports with design invariants and tests run", () => {
@@ -284,25 +300,25 @@ describe("validateOrchestraRoleOutput", () => {
     }
   })
 
-  it("rejects structurally weak arbitrary vocabularies", () => {
+  it("accepts concise substantive handoffs without canonical headings but rejects placeholder bodies", () => {
     expect(
       validateOrchestraRoleOutput(
         "orchestra-implementer",
         "STATUS: complete\nWORK_LOG: changed code\nQUALITY_GATES: passed\nHANDOFF_TARGET: review",
       ),
-    ).toContain("CHANGES")
+    ).toBeUndefined()
     expect(
       validateOrchestraRoleOutput(
         "orchestra-implementer",
         "STATUS: complete\nSUMMARY: long summary text\nNOTES: more notes\nSCOPE: files\nDETAILS: details",
       ),
-    ).toContain("CHANGES")
+    ).toContain("concrete validation")
     expect(
       validateOrchestraRoleOutput(
         "orchestra-implementer",
         "STATUS: complete\nA: one\nB: two\nC: three\nD: four",
       ),
-    ).toContain("CHANGES")
+    ).toContain("substantive handoff")
   })
 
   it("accepts bounded aliases, Markdown headings, and field order variations", () => {
@@ -377,45 +393,45 @@ describe("validateOrchestraRoleOutput", () => {
     ).toContain("FINDINGS")
   })
 
-  it("rejects empty, summary-only, and unsupported substitute sections", () => {
+  it("accepts summary-only and partially populated suggested sections when the body is substantive", () => {
     expect(
       validateOrchestraRoleOutput(
         "orchestra-implementer",
         "STATUS: complete\nCHANGES:\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review",
       ),
-    ).toContain("CHANGES")
+    ).toBeUndefined()
     expect(
       validateOrchestraRoleOutput(
         "orchestra-implementer",
         "STATUS: complete\nSUMMARY: changed files\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review",
       ),
-    ).toContain("CHANGES")
+    ).toBeUndefined()
     expect(
       validateOrchestraRoleOutput(
         "orchestra-reviewer",
         "STATUS: approved\nSUMMARY: looks good\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: test",
       ),
-    ).toContain("FINDINGS")
+    ).toBeUndefined()
   })
 
-  it("rejects placeholders, punctuation-only values, and unknown-heading bleed", () => {
+  it("accepts readable surrounding evidence even when a suggested field uses a placeholder", () => {
     for (const changes of ["<text>", "...", "-", "TODO"]) {
       expect(
         validateOrchestraRoleOutput(
           "orchestra-implementer",
           `STATUS: complete\nCHANGES: ${changes}\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review`,
         ),
-      ).toContain("CHANGES")
+      ).toBeUndefined()
     }
     expect(
       validateOrchestraRoleOutput(
         "orchestra-implementer",
         "STATUS: complete\nCHANGES:\nDETAILS: changed src/a.ts\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review",
       ),
-    ).toContain("CHANGES")
+    ).toBeUndefined()
   })
 
-  it("uses only sections after the final status and lets the final duplicate declaration win", () => {
+  it("uses only the substantive body after the final valid status", () => {
     const validBeforeFinalStatus = [
       "STATUS: complete",
       "CHANGES: changed src/a.ts",
@@ -425,7 +441,7 @@ describe("validateOrchestraRoleOutput", () => {
       "STATUS: complete",
       "SUMMARY: no final fields",
     ].join("\n")
-    expect(validateOrchestraRoleOutput("orchestra-implementer", validBeforeFinalStatus)).toContain("CHANGES")
+    expect(validateOrchestraRoleOutput("orchestra-implementer", validBeforeFinalStatus)).toContain("substantive handoff")
 
     const emptiedAtEnd = [
       "STATUS: complete",
@@ -435,7 +451,7 @@ describe("validateOrchestraRoleOutput", () => {
       "RISKS: none",
       "NEXT_ACTION: review",
     ].join("\n")
-    expect(validateOrchestraRoleOutput("orchestra-implementer", emptiedAtEnd)).toContain("CHANGES")
+    expect(validateOrchestraRoleOutput("orchestra-implementer", emptiedAtEnd)).toBeUndefined()
   })
 
   it("ignores quoted and fenced protocol examples", () => {
@@ -499,14 +515,14 @@ describe("validateOrchestraRoleOutput", () => {
     expect(validateOrchestraRoleOutput("orchestra-tester", tester)).toBeUndefined()
   })
 
-  it("quotes raw protocol-like output without overriding the blocked fallback", () => {
+  it("blocks a success status without concrete validation evidence", () => {
     const output = normalizeOrchestraRoleOutput(
       "orchestra-reviewer",
       "STATUS: approved\nThe remaining required fields were never returned.",
     )
 
-    expect(output).toContain("RAW> STATUS: approved")
-    expect(validateOrchestraRoleOutput("orchestra-reviewer", output)).toBeUndefined()
+    expect(output).toContain("STATUS: blocked")
+    expect(output).toContain("REASON: invalid_handoff")
   })
 })
 
@@ -550,20 +566,48 @@ describe("orchestraBlockedRecovery", () => {
       expect(outputs[index]).toContain("RECOVERY_STRATEGY:")
     }
     expect(outputs[0]).toContain("4 further implementer attempts remain")
-    expect(outputs[4]).toContain("Terminal for this phase")
+    expect(outputs[4]).toContain("Terminal for this chat turn")
     expect(outputs[4]).toContain("do not start a sixth implementer attempt")
+    expect(outputs[4]).toContain("new user message starts a fresh attempt budget")
     expect(orchestraBlockedRecovery(99)).toBe(outputs[4])
   })
 })
 
-describe("orchestraTaskAccessError", () => {
+describe("workflowTaskAccessError", () => {
   it("keeps Orchestra specialists private to the Orchestra Lead", () => {
-    expect(orchestraTaskAccessError("orchestra", "orchestra-implementer")).toBeUndefined()
-    expect(orchestraTaskAccessError("orchestra", "orchestra-reviewer")).toBeUndefined()
-    expect(orchestraTaskAccessError("orchestra", "orchestra-tester")).toBeUndefined()
-    expect(orchestraTaskAccessError("build", "orchestra-implementer")).toContain("private Orchestra specialist")
-    expect(orchestraTaskAccessError("plan", "orchestra-reviewer")).toContain("private Orchestra specialist")
-    expect(orchestraTaskAccessError("build", "general")).toBeUndefined()
-    expect(orchestraTaskAccessError("orchestra", "general")).toContain("must delegate using")
+    expect(workflowTaskAccessError("orchestra", "orchestra-assistant-specialist")).toBeUndefined()
+    expect(workflowTaskAccessError("orchestra", "orchestra-implementer")).toBeUndefined()
+    expect(workflowTaskAccessError("orchestra", "orchestra-reviewer")).toBeUndefined()
+    expect(workflowTaskAccessError("orchestra", "orchestra-tester")).toBeUndefined()
+    expect(workflowTaskAccessError("build", "orchestra-implementer")).toContain("private Orchestra specialist")
+    expect(workflowTaskAccessError("plan", "orchestra-reviewer")).toContain("private Orchestra specialist")
+    expect(workflowTaskAccessError("build", "orchestra-assistant-specialist")).toContain(
+      "private Orchestra specialist",
+    )
+    expect(workflowTaskAccessError("orchestra-implementer", "orchestra-assistant-specialist")).toContain(
+      "cannot delegate tasks",
+    )
+    expect(workflowTaskAccessError("orchestra-assistant-specialist", "general")).toContain("cannot delegate tasks")
+    expect(workflowTaskAccessError("build", "general")).toBeUndefined()
+    expect(workflowTaskAccessError("orchestra", "general")).toContain("must delegate using")
+    expect(workflowTaskAccessError("orchestra-custom", "orchestra-implementer")).toBeUndefined()
+    expect(workflowTaskAccessError("orchestra-custom", "orchestra-reviewer")).toBeUndefined()
+    expect(workflowTaskAccessError("orchestra-custom", "general")).toContain("must delegate using")
+  })
+
+  it("recognizes both Orchestra Lead profiles", () => {
+    expect(isOrchestraLead("orchestra")).toBe(true)
+    expect(isOrchestraLead("orchestra-custom")).toBe(true)
+    expect(isOrchestraLead("build")).toBe(false)
+  })
+
+  it("keeps Research specialists private to the Research Lead", () => {
+    expect(workflowTaskAccessError("research", "research-scout")).toBeUndefined()
+    expect(workflowTaskAccessError("research", "research-methodologist")).toBeUndefined()
+    expect(workflowTaskAccessError("research", "research-editor")).toBeUndefined()
+    expect(workflowTaskAccessError("research", "general")).toContain("must delegate using")
+    expect(workflowTaskAccessError("build", "research-analyst")).toContain("private Research specialist")
+    expect(workflowTaskAccessError("orchestra", "research-critic")).toContain("must delegate using")
+    expect(workflowTaskAccessError("research-writer", "research-reviewer")).toContain("cannot delegate tasks")
   })
 })

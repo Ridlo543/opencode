@@ -21,10 +21,11 @@ import { Database } from "@opencode-ai/core/database/database"
 import {
   resolveFinalModel,
   orchestraConcurrencyError,
-  orchestraTaskAccessError,
+  workflowTaskAccessError,
   orchestraHandoffInstruction,
   orchestraBlockedRecovery,
   orchestraRoleStatus,
+  isOrchestraLead,
   normalizeOrchestraRoleOutput,
   resolveModelOverride,
   validateOrchestraRoleOutput,
@@ -35,6 +36,53 @@ export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
   prompt(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
+}
+
+const ORCHESTRA_WORKFLOW_METADATA = "opencode.orchestra.workflow"
+
+type OrchestraWorkflowEntry = {
+  taskID: string
+  role: string
+  status?: string
+  requestedModel?: string
+  resolvedModel: string
+  variant?: string
+  startedAt: number
+  finishedAt?: number
+}
+
+type OrchestraWorkflowLedger = {
+  version: 1
+  phase: string
+  delegations: Record<string, number>
+  latest: Record<string, OrchestraWorkflowEntry>
+  reviewApproved: boolean
+  testsPassed: boolean
+  releaseReady: boolean
+  updatedAt: number
+}
+
+function orchestraLedger(value: unknown): OrchestraWorkflowLedger {
+  if (value && typeof value === "object" && (value as OrchestraWorkflowLedger).version === 1) {
+    return structuredClone(value as OrchestraWorkflowLedger)
+  }
+  return {
+    version: 1,
+    phase: "planning",
+    delegations: {},
+    latest: {},
+    reviewApproved: false,
+    testsPassed: false,
+    releaseReady: false,
+    updatedAt: Date.now(),
+  }
+}
+
+function orchestraPhase(role: string, status?: string) {
+  if (role === "orchestra-implementer") return status === "blocked" ? "implementation_blocked" : "implementation"
+  if (role === "orchestra-reviewer") return status === "approved" ? "review_approved" : "review"
+  if (role === "orchestra-tester") return status === "passed" ? "tests_passed" : "testing"
+  return "analysis"
 }
 
 const id = "task"
@@ -138,24 +186,68 @@ export const TaskTool = Tool.define(
     const database = yield* Database.Service
     const provider = yield* Provider.Service
     const orchestraSlots = yield* SynchronizedRef.make(new Map<string, Record<string, number>>())
-    const orchestraBlockedAttempts = yield* SynchronizedRef.make(new Map<string, number>())
+    const orchestraBlockedAttempts = yield* SynchronizedRef.make(
+      new Map<string, { messageID: MessageID; attempts: number }>(),
+    )
+    const orchestraLedgerUpdates = yield* SynchronizedRef.make(0)
+
+    const updateOrchestraLedger = Effect.fn("TaskTool.updateOrchestraLedger")(function* (
+      parentID: SessionID,
+      entry: OrchestraWorkflowEntry,
+    ) {
+      yield* SynchronizedRef.updateEffect(orchestraLedgerUpdates, () =>
+        Effect.gen(function* () {
+          const parent = yield* sessions.get(parentID)
+          const ledger = orchestraLedger(parent.metadata?.[ORCHESTRA_WORKFLOW_METADATA])
+          const previous = ledger.latest[entry.role]
+          ledger.delegations[entry.role] = (ledger.delegations[entry.role] ?? 0) + (entry.finishedAt ? 0 : 1)
+          ledger.latest[entry.role] = entry.finishedAt ? { ...previous, ...entry } : entry
+          ledger.phase = orchestraPhase(entry.role, entry.status)
+          if (!entry.finishedAt) {
+            if (entry.role === "orchestra-implementer") {
+              ledger.reviewApproved = false
+              ledger.testsPassed = false
+            }
+            if (entry.role === "orchestra-reviewer") {
+              ledger.reviewApproved = false
+              ledger.testsPassed = false
+            }
+            if (entry.role === "orchestra-tester") ledger.testsPassed = false
+          } else {
+            if (entry.role === "orchestra-reviewer") ledger.reviewApproved = entry.status === "approved"
+            if (entry.role === "orchestra-tester") ledger.testsPassed = entry.status === "passed"
+          }
+          ledger.releaseReady = ledger.reviewApproved && ledger.testsPassed
+          ledger.updatedAt = Date.now()
+          yield* sessions.setMetadata({
+            sessionID: parentID,
+            metadata: { ...Delegation.userMetadata(parent.metadata), [ORCHESTRA_WORKFLOW_METADATA]: ledger },
+          })
+          return Date.now()
+        }),
+      )
+    })
 
     const applyOrchestraRecovery = Effect.fn("TaskTool.applyOrchestraRecovery")(function* (
       parentID: SessionID,
+      messageID: MessageID,
       role: string,
       output: string,
     ) {
-      if (role !== "orchestra-implementer") {
+      if (role === "orchestra-reviewer" || role === "orchestra-tester") {
         yield* SynchronizedRef.update(orchestraBlockedAttempts, (state) => {
+          if (state.get(parentID)?.messageID !== messageID) return state
           const next = new Map(state)
           next.delete(parentID)
           return next
         })
         return output
       }
+      if (role !== "orchestra-implementer") return output
       const status = orchestraRoleStatus(role, output)
       if (status === "complete") {
         yield* SynchronizedRef.update(orchestraBlockedAttempts, (state) => {
+          if (state.get(parentID)?.messageID !== messageID) return state
           const next = new Map(state)
           next.delete(parentID)
           return next
@@ -164,8 +256,9 @@ export const TaskTool = Tool.define(
       }
       if (status !== "blocked") return output
       const attempt = yield* SynchronizedRef.modify(orchestraBlockedAttempts, (state) => {
-        const value = Math.min((state.get(parentID) ?? 0) + 1, 5)
-        return [value, new Map(state).set(parentID, value)] as const
+        const current = state.get(parentID)
+        const value = Math.min((current?.messageID === messageID ? current.attempts : 0) + 1, 5)
+        return [value, new Map(state).set(parentID, { messageID, attempts: value })] as const
       })
       return `${output}\n\n${orchestraBlockedRecovery(attempt)}`
     })
@@ -214,7 +307,7 @@ export const TaskTool = Tool.define(
       }
 
       const parent = yield* sessions.get(ctx.sessionID)
-      const accessError = orchestraTaskAccessError(parent.agent ?? ctx.agent, params.subagent_type)
+      const accessError = workflowTaskAccessError(parent.agent ?? ctx.agent, params.subagent_type)
       if (accessError) return yield* Effect.fail(new Error(accessError))
       const caller = yield* agent.get(parent.agent ?? ctx.agent)
       if (!caller) return yield* Effect.fail(new Error(`Unknown caller agent: ${parent.agent ?? ctx.agent}`))
@@ -260,9 +353,10 @@ export const TaskTool = Tool.define(
       // [CUSTOM] Model override support
       let modelOverride: ModelOverride | undefined
       if (params.model) {
-        if (parent.agent === "orchestra") {
+        if (parent.agent === "orchestra" || parent.agent === "research") {
+          const workflow = parent.agent === "orchestra" ? "orchestra" : "Research"
           return yield* Effect.fail(
-            new Error("The orchestra Lead cannot override specialist models; configure each role agent model instead."),
+            new Error(`The ${workflow} Lead cannot override specialist models; configure each role agent model instead.`),
           )
         }
         const result = yield* resolveModelOverride(params.model, provider)
@@ -337,7 +431,7 @@ export const TaskTool = Tool.define(
       if (session) yield* sessions.setPermission({ sessionID: session.id, permission: [...childPermission, ...childToolDenies] })
       const existingJob = yield* background.get(nextSession.id)
       const isRunningContinuation = existingJob?.status === "running"
-      if (isRunningContinuation && parent.agent === "orchestra") {
+      if (isRunningContinuation && isOrchestraLead(parent.agent ?? ctx.agent)) {
         return yield* Effect.fail(
           new Error(`Cannot continue running Orchestra task ${nextSession.id}; wait for its handoff or cancel it first.`),
         )
@@ -351,7 +445,8 @@ export const TaskTool = Tool.define(
       const variant = msg.info.variant
 
       // [CUSTOM] Resolve final model with fallback chain.
-      const model = resolveFinalModel(modelOverride, next.model, {
+      const agentModel = parent.agent === "orchestra-custom" ? undefined : next.model
+      const model = resolveFinalModel(modelOverride, agentModel, {
         providerID: msg.info.providerID,
         modelID: msg.info.modelID,
       })
@@ -360,6 +455,18 @@ export const TaskTool = Tool.define(
         sessionId: nextSession.id,
         model,
         ...(runInBackground ? { background: true } : {}),
+      }
+
+      const workflowEntry = {
+        taskID: nextSession.id,
+        role: next.name,
+        requestedModel: params.model,
+        resolvedModel: `${model.providerID}/${model.modelID}`,
+        variant: (modelOverride || agentModel) ? undefined : variant,
+        startedAt: Date.now(),
+      } satisfies OrchestraWorkflowEntry
+      if (isOrchestraLead(parent.agent ?? ctx.agent)) {
+        yield* updateOrchestraLedger(ctx.sessionID, workflowEntry)
       }
 
       yield* ctx.metadata({
@@ -380,7 +487,7 @@ export const TaskTool = Tool.define(
             providerID: model.providerID,
           },
           // [CUSTOM] Discard variant when model override is set
-          variant: (modelOverride || next.model) ? undefined : variant,
+          variant: (modelOverride || agentModel) ? undefined : variant,
           agent: next.name,
           parts,
         })
@@ -397,25 +504,18 @@ export const TaskTool = Tool.define(
           .join("\n")
         const instruction = orchestraHandoffInstruction(next.name)
         if (!instruction || !validateOrchestraRoleOutput(next.name, output))
-          return yield* applyOrchestraRecovery(ctx.sessionID, next.name, output)
+          return yield* applyOrchestraRecovery(ctx.sessionID, ctx.messageID, next.name, output)
 
         const evidence = handoffRepairEvidence(yield* sessions.messages({ sessionID: nextSession.id }))
-        const repairSession = yield* sessions.create({
-          parentID: ctx.sessionID,
-          title: `${params.description} handoff repair (@${next.name} subagent)`,
-          agent: next.name,
-          internalMetadata: Delegation.metadata({ kind: "handoff-repair", parentID: ctx.sessionID, agent: next.name }),
-          permission: nextSession.permission,
-        })
         const repair = yield* ops
           .prompt({
             messageID: MessageID.ascending(),
-            sessionID: repairSession.id,
+            sessionID: nextSession.id,
             model: {
               modelID: model.modelID,
               providerID: model.providerID,
             },
-            variant: (modelOverride || next.model) ? undefined : variant,
+            variant: (modelOverride || agentModel) ? undefined : variant,
             agent: next.name,
             tools: { "*": false },
             parts: [
@@ -433,17 +533,14 @@ export const TaskTool = Tool.define(
               },
             ],
           })
-          .pipe(
-            Effect.exit,
-            Effect.ensuring(sessions.setArchived({ sessionID: repairSession.id, time: Date.now() })),
-          )
+          .pipe(Effect.exit)
         if (Exit.isSuccess(repair) && repair.value.info.role === "assistant" && !repair.value.info.error) {
           const rendered = repair.value.parts
             .filter((item): item is Extract<typeof item, { type: "text" }> => item.type === "text")
             .map((item) => item.text)
             .join("\n")
           if (!validateOrchestraRoleOutput(next.name, rendered))
-            return yield* applyOrchestraRecovery(ctx.sessionID, next.name, rendered)
+            return yield* applyOrchestraRecovery(ctx.sessionID, ctx.messageID, next.name, rendered)
         }
 
         const repairError =
@@ -460,8 +557,19 @@ export const TaskTool = Tool.define(
             .filter(Boolean)
             .join("\n"),
         )
-        return yield* applyOrchestraRecovery(ctx.sessionID, next.name, normalized)
+        return yield* applyOrchestraRecovery(ctx.sessionID, ctx.messageID, next.name, normalized)
       })
+      const trackedTask = () =>
+        runTask().pipe(
+          Effect.tap((output) => {
+            if (!isOrchestraLead(parent.agent ?? ctx.agent)) return Effect.void
+            return updateOrchestraLedger(ctx.sessionID, {
+              ...workflowEntry,
+              status: orchestraRoleStatus(next.name, output),
+              finishedAt: Date.now(),
+            })
+          }),
+        )
 
       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (
         state: "completed" | "error",
@@ -503,7 +611,7 @@ export const TaskTool = Tool.define(
         )
       })
 
-      if (yield* background.extend({ id: nextSession.id, run: runTask() })) {
+      if (yield* background.extend({ id: nextSession.id, run: trackedTask() })) {
         return {
           title: params.description,
           metadata: {
@@ -520,7 +628,7 @@ export const TaskTool = Tool.define(
         }
       }
 
-      const reserved = parent.agent === "orchestra"
+      const reserved = isOrchestraLead(parent.agent ?? ctx.agent)
       if (reserved) yield* reserveOrchestraSlot(ctx.sessionID, next.name)
 
       const info = yield* background.start({
@@ -535,7 +643,7 @@ export const TaskTool = Tool.define(
           }),
           notify(nextSession.id),
         ]),
-        run: runTask().pipe(Effect.onInterrupt(() => ops.cancel(nextSession.id))),
+        run: trackedTask().pipe(Effect.onInterrupt(() => ops.cancel(nextSession.id))),
       })
       if (reserved)
         yield* background

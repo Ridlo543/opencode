@@ -8,7 +8,7 @@ import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Config } from "@/config/config"
 import { LLM } from "../../src/session/llm"
-import { SessionCompaction } from "../../src/session/compaction"
+import { SessionCompaction, workflowCompactionContext } from "../../src/session/compaction"
 import { Token } from "@/util/token"
 import { Plugin } from "../../src/plugin"
 import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
@@ -28,6 +28,62 @@ import { testEffect } from "../lib/effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { TestConfig } from "../fixture/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import type { Session } from "@/session/session"
+
+function workflowSession(input: Partial<Session.Info>): Session.Info {
+  return {
+    id: SessionID.make("ses_compaction_workflow"),
+    slug: "workflow",
+    projectID: "project" as Session.Info["projectID"],
+    directory: "/tmp",
+    title: "workflow",
+    version: "test",
+    time: { created: 1, updated: 1 },
+    ...input,
+  }
+}
+
+describe("workflow compaction context", () => {
+  test("anchors Orchestra Lead ledger without turning counters into limits", () => {
+    const context = workflowCompactionContext(
+      workflowSession({
+        agent: "orchestra",
+        metadata: {
+          "opencode.orchestra.workflow": {
+            version: 1,
+            phase: "review",
+            delegations: { "orchestra-reviewer": 4 },
+            releaseReady: false,
+          },
+        },
+      }),
+    ).join("\n")
+
+    expect(context).toContain("orchestra-workflow-state")
+    expect(context).toContain('"phase":"review"')
+    expect(context).toContain("never retry limits")
+  })
+
+  test("anchors delegated Orchestra and Research role ownership", () => {
+    const orchestra = workflowCompactionContext(
+      workflowSession({ agent: "orchestra-reviewer", parentID: SessionID.make("ses_parent") }),
+    ).join("\n")
+    const research = workflowCompactionContext(
+      workflowSession({ agent: "research-scout", parentID: SessionID.make("ses_research") }),
+    ).join("\n")
+
+    expect(orchestra).toContain("continue the same task")
+    expect(orchestra).toContain("required substantive handoff and STATUS")
+    expect(research).toContain("continue the same assignment")
+    expect(research).toContain("Do not restart completed work")
+  })
+
+  test("anchors Research Lead evidence state", () => {
+    const context = workflowCompactionContext(workflowSession({ agent: "research" })).join("\n")
+    expect(context).toContain("protocol, evidence ledger, source provenance")
+    expect(context).toContain("continue the current research workflow")
+  })
+})
 import { LLMEvent, Usage } from "@opencode-ai/llm"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -204,6 +260,7 @@ function fake(
     },
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
+    setToolMetadata: () => {},
     process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
   } satisfies SessionProcessorModule.SessionProcessor.Handle
 }
@@ -978,6 +1035,51 @@ describe("session.compaction.process", () => {
       })
       if (last?.parts[0]?.type === "text") {
         expect(last.parts[0].text).toContain("Continue if you have next steps")
+      }
+    }),
+  )
+
+  it.instance(
+    "auto-continues delegated Orchestra and Research sessions with role-aware instructions",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      for (const agent of ["orchestra-implementer", "research-scout"]) {
+        const session = yield* ssn.create({ agent, parentID: SessionID.make(`ses_parent_${agent}`) })
+        const msg = yield* ssn.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: session.id,
+          agent,
+          model: ref,
+          time: { created: Date.now() },
+        })
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: msg.id,
+          sessionID: session.id,
+          type: "text",
+          text: "continue delegated work",
+        })
+        const result = yield* SessionCompaction.use.process({
+          parentID: msg.id,
+          messages: yield* ssn.messages({ sessionID: session.id }),
+          sessionID: session.id,
+          auto: true,
+        })
+
+        const last = (yield* ssn.messages({ sessionID: session.id })).at(-1)
+        expect(result).toBe("continue")
+        expect(last?.info.role).toBe("user")
+        expect(last?.info.role === "user" ? last.info.agent : undefined).toBe(agent)
+        expect(last?.parts[0]).toMatchObject({
+          type: "text",
+          synthetic: true,
+          metadata: { compaction_continue: true },
+        })
+        if (last?.parts[0]?.type === "text") {
+          expect(last.parts[0].text).toContain("Continue the same delegated assignment")
+          expect(last.parts[0].text).toContain("required substantive handoff")
+        }
       }
     }),
   )

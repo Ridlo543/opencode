@@ -19,7 +19,7 @@ import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
 import { useCommandShortcut } from "../keymap"
 import { useEvent } from "../context/event"
 
-type SessionListFilter = { scope?: "project"; path?: string }
+type SessionListFilter = { scope?: "project" | "global"; path?: string }
 
 export function createDialogSessionListQuery(input: { search?: string; filter: SessionListFilter }) {
   const search = input.search?.trim()
@@ -280,7 +280,25 @@ export function DialogSessionList() {
       onMove={() => {
         setToDelete(undefined)
       }}
-      onSelect={(option) => {
+      onSelect={async (option) => {
+        const selected = sessions().find((session) => session.id === option.value)
+        if (selected?.directory && selected.directory !== project.instance.directory()) {
+          const previous = sdk.directory
+          try {
+            sdk.setDirectory(selected.directory)
+            project.workspace.set(undefined)
+            await sync.bootstrap({ fatal: false })
+          } catch (err) {
+            if (previous) sdk.setDirectory(previous)
+            await sync.bootstrap({ fatal: false }).catch(() => undefined)
+            toast.show({
+              title: "Failed to switch project",
+              message: errorMessage(err),
+              variant: "error",
+            })
+            return
+          }
+        }
         route.navigate({
           type: "session",
           sessionID: option.value,

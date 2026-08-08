@@ -285,6 +285,44 @@ it.instance(
 )
 
 it.instance(
+  "refreshes discovered provider models without rebuilding the service",
+  Effect.gen(function* () {
+    let models = ["remote/one"]
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ data: models.map((id) => ({ id })) })
+      },
+    })
+    yield* setProcessEnv("TEST_DISCOVERY_URL", `${server.url}v1/models`)
+
+    const provider = yield* Provider.Service
+    const first = yield* provider.list()
+    expect(first[ProviderV2.ID.make("discoverable")].models["remote/one"]).toBeDefined()
+    expect(first[ProviderV2.ID.make("discoverable")].models["remote/two"]).toBeUndefined()
+
+    models = ["remote/one", "remote/two"]
+    yield* provider.refresh()
+
+    const second = yield* provider.list()
+    expect(second[ProviderV2.ID.make("discoverable")].models["remote/two"]).toBeDefined()
+  }),
+  {
+    config: {
+      provider: {
+        discoverable: {
+          name: "Discoverable",
+          npm: "@ai-sdk/openai-compatible",
+          modelDiscovery: { url: "{env:TEST_DISCOVERY_URL}" },
+          options: { apiKey: "discovery-key" },
+          models: { "manual/model": { name: "Manual Model" } },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "filters alpha provider models by default",
   Effect.gen(function* () {
     const providers = yield* list

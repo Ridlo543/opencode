@@ -1,5 +1,5 @@
 import type { Session } from "@/session/session"
-import { isOrchestraRole } from "@/tool/model-override"
+import { isPrivateWorkflowAgent, isOrchestraPrivateAgent, isResearchRole } from "@/tool/model-override"
 
 const KIND = "opencode.task.kind"
 const PARENT = "opencode.task.parent"
@@ -39,9 +39,10 @@ export function isDelegatedTo(session: Session.Info, agent: string) {
 }
 
 export function selectionError(session: Session.Info, agent: string, delegated = false, workflowTransition = false) {
-  if (isOrchestraRole(agent)) {
+  if (isPrivateWorkflowAgent(agent)) {
     if (delegated && isDelegatedTo(session, agent)) return undefined
-    return `${agent} is a private Orchestra specialist and cannot run as a primary session agent.`
+    const workflow = isOrchestraPrivateAgent(agent) ? "Orchestra" : isResearchRole(agent) ? "Research" : "workflow"
+    return `${agent} is a private ${workflow} specialist and cannot run as a primary session agent.`
   }
   return undefined
 }

@@ -226,6 +226,138 @@ describe("tool.task", () => {
     },
   )
 
+  it.instance("allows only the Orchestra Lead to delegate to its assistant", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const lead = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const result = yield* def.execute(
+        {
+          description: "scan risks",
+          prompt: "summarize risks without editing",
+          subagent_type: "orchestra-assistant-specialist",
+        },
+        {
+          sessionID: lead.chat.id,
+          messageID: lead.assistant.id,
+          agent: "orchestra",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({ text: "ADVISORY: inspect the cache key" }) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect((yield* sessions.get(result.metadata.sessionId)).agent).toBe("orchestra-assistant-specialist")
+      expect(result.output).toContain("ADVISORY: inspect the cache key")
+
+      const role = yield* seedAgent("orchestra-implementer")
+      const denied = yield* def
+        .execute(
+          {
+            description: "nested scan",
+            prompt: "inspect implementation risks",
+            subagent_type: "orchestra-assistant-specialist",
+          },
+          {
+            sessionID: role.chat.id,
+            messageID: role.assistant.id,
+            agent: "orchestra-implementer",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(denied)).toBe(true)
+      if (Exit.isFailure(denied)) expect(String(Cause.squash(denied.cause))).toContain("cannot delegate tasks")
+    }),
+    {
+      config: {
+        subagent_depth: 2,
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-assistant-specialist": { mode: "subagent" },
+          "orchestra-implementer": {
+            mode: "subagent",
+            permission: { task: { "orchestra-assistant-specialist": "allow" } },
+          },
+        },
+      },
+    },
+  )
+
+  it.instance("allows only the Research Lead to delegate to Research specialists", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const lead = yield* seedAgent("research")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const result = yield* def.execute(
+        {
+          description: "search primary literature",
+          prompt: "build the source register for the assigned evidence lane",
+          subagent_type: "research-scout",
+        },
+        {
+          sessionID: lead.chat.id,
+          messageID: lead.assistant.id,
+          agent: "research",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({ text: "STATUS: complete\nSOURCES_ADDED: doi:10/example" }) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect((yield* sessions.get(result.metadata.sessionId)).agent).toBe("research-scout")
+      expect(result.output).toContain("SOURCES_ADDED: doi:10/example")
+
+      const role = yield* seedAgent("research-scout")
+      const denied = yield* def
+        .execute(
+          {
+            description: "nested analysis",
+            prompt: "analyze the sources",
+            subagent_type: "research-analyst",
+          },
+          {
+            sessionID: role.chat.id,
+            messageID: role.assistant.id,
+            agent: "research-scout",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(denied)).toBe(true)
+      if (Exit.isFailure(denied)) expect(String(Cause.squash(denied.cause))).toContain("cannot delegate tasks")
+    }),
+    {
+      config: {
+        subagent_depth: 2,
+        agent: {
+          research: { mode: "primary" },
+          "research-scout": { mode: "subagent" },
+          "research-analyst": {
+            mode: "subagent",
+            permission: { task: { "research-analyst": "allow" } },
+          },
+        },
+      },
+    },
+  )
+
   it.instance("rejects model overrides from the orchestra Lead", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seedAgent("orchestra")
@@ -259,6 +391,193 @@ describe("tool.task", () => {
         agent: {
           orchestra: { mode: "primary" },
           "orchestra-implementer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance("allows model overrides from the custom orchestra Lead", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra-custom")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const prompts: SessionPrompt.PromptInput[] = []
+
+      yield* def.execute(
+        {
+          description: "override custom specialist",
+          prompt: "implement the requested change",
+          subagent_type: "orchestra-implementer",
+          model: "test-provider/test-model",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "orchestra-custom",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: {
+              ...stubOps(),
+              prompt: (input) => {
+                prompts.push(input)
+                return Effect.succeed(
+                  reply(
+                    input,
+                    "STATUS: complete\nCHANGES: none\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review",
+                  ),
+                )
+              },
+            } satisfies TaskPromptOps,
+          },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(prompts).toHaveLength(1)
+      expect(prompts[0]?.model).toEqual({
+        providerID: ProviderV2.ID.make("test-provider"),
+        modelID: ModelV2.ID.make("test-model"),
+      })
+    }),
+    {
+      config: {
+        provider: {
+          "test-provider": {
+            name: "Test Provider",
+            npm: "@ai-sdk/openai-compatible",
+            env: [],
+            models: {
+              "test-model": {
+                name: "Test Model",
+                tool_call: true,
+                limit: { context: 128_000, output: 4096 },
+              },
+            },
+            options: { apiKey: "test-key" },
+          },
+        },
+        agent: {
+          "orchestra-custom": { mode: "primary", permission: { model_override: "allow" } },
+          "orchestra-implementer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance("inherits the Leader model for custom orchestra specialists without an override", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra-custom")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const prompts: SessionPrompt.PromptInput[] = []
+
+      yield* def.execute(
+        {
+          description: "inherit custom Leader model",
+          prompt: "review the requested change",
+          subagent_type: "orchestra-reviewer",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "orchestra-custom",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: {
+              ...stubOps(),
+              prompt: (input) => {
+                prompts.push(input)
+                return Effect.succeed(
+                  reply(
+                    input,
+                    "STATUS: approved\nFINDINGS: none\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: test",
+                  ),
+                )
+              },
+            } satisfies TaskPromptOps,
+          },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(prompts).toHaveLength(1)
+      expect(prompts[0]?.model).toEqual(ref)
+    }),
+    {
+      config: {
+        agent: {
+          "orchestra-custom": { mode: "primary", permission: { model_override: "allow" } },
+          "orchestra-reviewer": { mode: "subagent", model: "opencode/big-pickle" },
+        },
+      },
+    },
+  )
+
+  it.instance("persists flexible Orchestra quality state and model provenance without retry caps", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const sessions = yield* Session.Service
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const outputs = [
+        "STATUS: complete\nCHANGES: first implementation\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review",
+        "STATUS: needs_revision\nFINDINGS: one defect remains\nVALIDATION: reviewed\nRISKS: defect\nNEXT_ACTION: revise",
+        "STATUS: complete\nCHANGES: revised implementation\nVALIDATION: pass\nRISKS: none\nNEXT_ACTION: review",
+        "STATUS: approved\nFINDINGS: none after revision\nVALIDATION: reviewed\nRISKS: none\nNEXT_ACTION: test",
+        "STATUS: failed\nCHANGES: tests added\nVALIDATION: one failure\nFAILURES: regression\nNEXT_ACTION: repair",
+        "STATUS: passed\nCHANGES: tests retained\nVALIDATION: all pass\nFAILURES: none\nNEXT_ACTION: complete",
+      ]
+      const roles = [
+        "orchestra-implementer",
+        "orchestra-reviewer",
+        "orchestra-implementer",
+        "orchestra-reviewer",
+        "orchestra-tester",
+        "orchestra-tester",
+      ]
+
+      for (let index = 0; index < roles.length; index++) {
+        yield* def.execute(
+          {
+            description: `workflow step ${index}`,
+            prompt: "perform the next evidence-based workflow step",
+            subagent_type: roles[index]!,
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "orchestra",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ text: outputs[index] }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+      }
+
+      const ledger = (yield* sessions.get(chat.id)).metadata?.["opencode.orchestra.workflow"] as any
+      expect(ledger.delegations["orchestra-implementer"]).toBe(2)
+      expect(ledger.delegations["orchestra-reviewer"]).toBe(2)
+      expect(ledger.delegations["orchestra-tester"]).toBe(2)
+      expect(ledger.latest["orchestra-reviewer"].status).toBe("approved")
+      expect(ledger.latest["orchestra-tester"].status).toBe("passed")
+      expect(ledger.latest["orchestra-tester"].resolvedModel).toBe("test/test-model")
+      expect(ledger.reviewApproved).toBe(true)
+      expect(ledger.testsPassed).toBe(true)
+      expect(ledger.releaseReady).toBe(true)
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": { mode: "subagent" },
+          "orchestra-reviewer": { mode: "subagent" },
+          "orchestra-tester": { mode: "subagent" },
         },
       },
     },
@@ -344,7 +663,7 @@ describe("tool.task", () => {
           context,
         )
         expect(result.output).toContain(`ORCHESTRA_RECOVERY: blocked attempt ${attempt} of 5`)
-        if (attempt === 5) expect(result.output).toContain("Terminal for this phase")
+        if (attempt === 5) expect(result.output).toContain("Terminal for this chat turn")
       }
 
       const clamped = yield* def.execute(
@@ -378,6 +697,100 @@ describe("tool.task", () => {
         context,
       )
       expect(reset.output).toContain("blocked attempt 1 of 5")
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance("rejects model overrides from the Research Lead", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("research")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const exit = yield* def
+        .execute(
+          {
+            description: "override specialist",
+            prompt: "search the assigned literature lane",
+            subagent_type: "research-scout",
+            model: "test/other-model",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "research",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(String(Cause.squash(exit.cause))).toContain("Research Lead cannot override")
+    }),
+    {
+      config: {
+        agent: {
+          research: { mode: "primary" },
+          "research-scout": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance("scopes blocked implementer attempts to one parent chat turn", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const sessions = yield* Session.Service
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let output = "STATUS: blocked\nCHANGES: retained work\nVALIDATION: blocked\nRISKS: unresolved\nNEXT_ACTION: retry"
+      const execute = (messageID: MessageID) =>
+        def.execute(
+          {
+            description: "implementation attempt",
+            prompt: "perform the implementation work",
+            subagent_type: "orchestra-implementer",
+          },
+          {
+            sessionID: chat.id,
+            messageID,
+            agent: "orchestra",
+            abort: new AbortController().signal,
+            extra: {
+              promptOps: {
+                ...stubOps(),
+                prompt: (input: SessionPrompt.PromptInput) => Effect.succeed(reply(input, output)),
+              } satisfies TaskPromptOps,
+            },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        expect((yield* execute(assistant.id)).output).toContain(`blocked attempt ${attempt} of 5`)
+      }
+
+      const nextTurn = MessageID.ascending()
+      yield* sessions.updateMessage({ ...assistant, id: nextTurn, time: { created: Date.now() + 1 } })
+      expect((yield* execute(nextTurn)).output).toContain("blocked attempt 1 of 5")
+
+      output = "STATUS: complete\nCHANGES: fixed old turn\nVALIDATION: passed\nRISKS: none\nNEXT_ACTION: review"
+      expect((yield* execute(assistant.id)).output).not.toContain("ORCHESTRA_RECOVERY")
+
+      output = "STATUS: blocked\nCHANGES: retained work\nVALIDATION: blocked\nRISKS: unresolved\nNEXT_ACTION: retry"
+      expect((yield* execute(nextTurn)).output).toContain("blocked attempt 2 of 5")
     }),
     {
       config: {
@@ -430,6 +843,44 @@ describe("tool.task", () => {
     },
   )
 
+  it.instance("does not reset blocked implementer recovery after assistant advice", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const execute = (role: "orchestra-implementer" | "orchestra-assistant-specialist", output: string) =>
+        def.execute(
+          { description: "phase task", prompt: "perform phase work", subagent_type: role },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "orchestra",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ text: output }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+      const blocked = "STATUS: blocked\nCHANGES: retained work\nVALIDATION: blocked\nRISKS: unresolved\nNEXT_ACTION: retry"
+      expect((yield* execute("orchestra-implementer", blocked)).output).toContain("blocked attempt 1 of 5")
+      expect((yield* execute("orchestra-assistant-specialist", "ADVISORY: inspect another strategy")).output).not.toContain(
+        "ORCHESTRA_RECOVERY",
+      )
+      expect((yield* execute("orchestra-implementer", blocked)).output).toContain("blocked attempt 2 of 5")
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-implementer": { mode: "subagent" },
+          "orchestra-assistant-specialist": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
   it.instance("repairs an empty orchestra handoff with one structured turn", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seedAgent("orchestra")
@@ -471,7 +922,7 @@ describe("tool.task", () => {
       )
 
       expect(prompts).toHaveLength(2)
-      expect(prompts[1]?.sessionID).not.toBe(prompts[0]?.sessionID)
+      expect(prompts[1]?.sessionID).toBe(prompts[0]?.sessionID)
       expect(prompts[1]?.tools).toEqual({ "*": false })
       expect(prompts[1]?.format).toBeUndefined()
       expect(prompts[1]?.parts[0]).toMatchObject({
@@ -480,7 +931,7 @@ describe("tool.task", () => {
       })
       expect(result.output).toContain("STATUS: complete")
       expect(result.output).toContain("CHANGES: updated migration")
-      expect((yield* sessions.get(prompts[1]!.sessionID)).time.archived).toBeNumber()
+      expect((yield* sessions.get(prompts[1]!.sessionID)).time.archived).toBeUndefined()
       expect((yield* sessions.get(result.metadata.sessionId)).permission).not.toContainEqual({
         permission: "*",
         pattern: "*",
@@ -671,6 +1122,61 @@ describe("tool.task", () => {
     },
   )
 
+  it.instance("passes a substantive reviewer finding through without formatting repair", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seedAgent("orchestra")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const prompts: SessionPrompt.PromptInput[] = []
+      const output = [
+        "STATUS: needs_revision",
+        "SUMMARY: The prior root findings are addressed, but one concurrency race remains.",
+        "FINDINGS:",
+        "- MEDIUM — A duplicate begin racing completion can return unavailable instead of the committed replay.",
+        "Evidence: completion may insert the result and delete the claim while begin waits on the claim lock.",
+        "After a missing claim, begin should recheck the committed result and cover the interleaving with a deterministic test.",
+      ].join("\n")
+
+      const result = yield* def.execute(
+        {
+          description: "review concurrency fix",
+          prompt: "review the concurrency fix",
+          subagent_type: "orchestra-reviewer",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "orchestra",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: {
+              ...stubOps(),
+              prompt: (input) => {
+                prompts.push(input)
+                return Effect.succeed(reply(input, output))
+              },
+            } satisfies TaskPromptOps,
+          },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(prompts).toHaveLength(1)
+      expect(result.output).toContain("STATUS: needs_revision")
+      expect(result.output).not.toContain("invalid_handoff")
+    }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          "orchestra-reviewer": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
   it.instance("repairs reviewer and tester handoffs with their role-specific fields", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seedAgent("orchestra")
@@ -719,10 +1225,10 @@ describe("tool.task", () => {
         )
 
         expect(prompts).toHaveLength(2)
-        expect(prompts[1]?.sessionID).not.toBe(prompts[0]?.sessionID)
+        expect(prompts[1]?.sessionID).toBe(prompts[0]?.sessionID)
         expect(prompts[1]?.agent).toBe(testCase.role)
         expect(prompts[1]?.model).toEqual(prompts[0]?.model)
-        expect((yield* sessions.get(prompts[1]!.sessionID)).time.archived).toBeNumber()
+        expect((yield* sessions.get(prompts[1]!.sessionID)).time.archived).toBeUndefined()
         expect(result.metadata.sessionId).toBe(prompts[0]?.sessionID)
         expect(result.output).toContain(testCase.field)
       }
@@ -916,10 +1422,12 @@ describe("tool.task", () => {
 
         const buildDescription = yield* describe(build)
         const orchestraDescription = yield* describe(orchestra)
+        expect(buildDescription).not.toContain("orchestra-assistant-specialist")
         expect(buildDescription).not.toContain("orchestra-implementer")
         expect(buildDescription).not.toContain("orchestra-reviewer")
         expect(buildDescription).not.toContain("orchestra-tester")
         expect(orchestraDescription).toContain("orchestra-implementer")
+        expect(orchestraDescription).toContain("orchestra-assistant-specialist")
         expect(orchestraDescription).toContain("orchestra-reviewer")
         expect(orchestraDescription).toContain("orchestra-tester")
         expect(orchestraDescription).not.toContain("- general:")
@@ -929,9 +1437,61 @@ describe("tool.task", () => {
       config: {
         agent: {
           orchestra: { mode: "primary" },
+          "orchestra-assistant-specialist": { mode: "subagent" },
           "orchestra-implementer": { mode: "subagent" },
           "orchestra-reviewer": { mode: "subagent" },
           "orchestra-tester": { mode: "subagent" },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "shows Research specialists only to the Research Lead",
+    () =>
+      Effect.gen(function* () {
+        const agent = yield* Agent.Service
+        const registry = yield* ToolRegistry.Service
+        const build = yield* agent.get("build")
+        const orchestra = yield* agent.get("orchestra")
+        const research = yield* agent.get("research")
+        const describe = Effect.fnUntraced(function* (caller: Agent.Info) {
+          return (yield* registry.tools({ ...ref, agent: caller })).find((tool) => tool.id === TaskTool.id)?.description ?? ""
+        })
+
+        const buildDescription = yield* describe(build)
+        const orchestraDescription = yield* describe(orchestra)
+        const researchDescription = yield* describe(research)
+        for (const role of [
+          "research-methodologist",
+          "research-scout",
+          "research-analyst",
+          "research-critic",
+          "research-writer",
+          "research-reviewer",
+          "research-editor",
+        ]) {
+          expect(buildDescription).not.toContain(role)
+          expect(orchestraDescription).not.toContain(role)
+          expect(researchDescription).toContain(role)
+        }
+        expect(researchDescription).not.toContain("orchestra-implementer")
+        expect(researchDescription).not.toContain("- general:")
+        expect(researchDescription).not.toContain("- explore:")
+      }),
+    {
+      config: {
+        agent: {
+          orchestra: { mode: "primary" },
+          research: { mode: "primary" },
+          "research-methodologist": { mode: "subagent" },
+          "research-scout": { mode: "subagent" },
+          "research-analyst": { mode: "subagent" },
+          "research-critic": { mode: "subagent" },
+          "research-writer": { mode: "subagent" },
+          "research-reviewer": { mode: "subagent" },
+          "research-editor": { mode: "subagent" },
+          "orchestra-implementer": { mode: "subagent" },
         },
       },
     },
@@ -943,13 +1503,39 @@ describe("tool.task", () => {
       Effect.gen(function* () {
         const agent = yield* Agent.Service
         const specialist = yield* agent.get("orchestra-implementer")
+        const assistant = yield* agent.get("orchestra-assistant-specialist")
         expect(specialist.mode).toBe("subagent")
         expect(specialist.hidden).toBe(true)
+        expect(assistant.mode).toBe("subagent")
+        expect(assistant.hidden).toBe(true)
       }),
     {
       config: {
         agent: {
           "orchestra-implementer": { mode: "primary", hidden: false },
+          "orchestra-assistant-specialist": { mode: "primary", hidden: false },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "keeps reserved Research specialists hidden subagents after config merge",
+    () =>
+      Effect.gen(function* () {
+        const agent = yield* Agent.Service
+        const scout = yield* agent.get("research-scout")
+        const writer = yield* agent.get("research-writer")
+        expect(scout.mode).toBe("subagent")
+        expect(scout.hidden).toBe(true)
+        expect(writer.mode).toBe("subagent")
+        expect(writer.hidden).toBe(true)
+      }),
+    {
+      config: {
+        agent: {
+          "research-scout": { mode: "primary", hidden: false },
+          "research-writer": { mode: "primary", hidden: false },
         },
       },
     },
@@ -961,7 +1547,8 @@ describe("tool.task", () => {
       Effect.gen(function* () {
         const agent = yield* Agent.Service
         const orchestra = yield* agent.get("orchestra")
-        expect(orchestra.prompt).toContain("at most five consecutive implementer attempts")
+        expect(orchestra.prompt).toContain("at most five consecutive implementer attempts within one user chat turn")
+        expect(orchestra.prompt).toContain("new user message in the same session starts a fresh attempt budget")
         expect(orchestra.prompt).toContain("ORCHESTRA_RECOVERY")
         expect(orchestra.prompt).toContain("supersedes any earlier instruction")
       }),

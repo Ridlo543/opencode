@@ -1076,6 +1076,8 @@ itProviderError.live("session.processor effect tests fail provider-executed erro
           return Effect.void
         })
         const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const metadata = { sessionId: "child-session" }
+        handle.setToolMetadata("call-1", { title: "provider lookup", metadata })
 
         yield* handle.process({
           user: {
@@ -1098,7 +1100,10 @@ itProviderError.live("session.processor effect tests fail provider-executed erro
         const parts = yield* MessageV2.parts(msg.id)
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
         expect(call?.state.status).toBe("error")
-        if (call?.state.status === "error") expect(call.state.error).toBe("provider boom")
+        if (call?.state.status === "error") {
+          expect(call.state.error).toBe("provider boom")
+          expect(call.state.metadata).toEqual(metadata)
+        }
         expect(seen).toContain(MessageV2.Event.PartUpdated.type)
         expect(seen).toContain(MessageV2.Event.Updated.type)
         expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([])

@@ -29,6 +29,20 @@ describe("agent delegation provenance", () => {
     expect(Delegation.selectionError(session({ agent: "build" }), "orchestra-implementer")).toContain(
       "private Orchestra specialist",
     )
+    expect(Delegation.selectionError(session({ agent: "build" }), "orchestra-assistant-specialist")).toContain(
+      "private Orchestra specialist",
+    )
+    const researchParentID = "ses_research_parent"
+    const research = session({
+      parentID: researchParentID as Session.Info["parentID"],
+      agent: "research-scout",
+      metadata: Delegation.metadata({ kind: "delegated-task", parentID: researchParentID, agent: "research-scout" }),
+    })
+    expect(Delegation.selectionError(research, "research-scout", true)).toBeUndefined()
+    expect(Delegation.selectionError(research, "research-scout")).toContain("private Research specialist")
+    expect(Delegation.selectionError(session({ agent: "build" }), "research-editor")).toContain(
+      "private Research specialist",
+    )
     expect(Delegation.selectionError(session({ agent: "build" }), "general")).toBeUndefined()
     expect(Delegation.selectionError(session({ agent: "build" }), "orchestra", false, true)).toBeUndefined()
     expect(Delegation.selectionError(session({ agent: "build" }), "orchestra")).toBeUndefined()

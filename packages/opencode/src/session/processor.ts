@@ -45,6 +45,7 @@ export interface Handle {
       attachments?: SessionV1.FilePart[]
     },
   ) => Effect.Effect<void>
+  readonly setToolMetadata: (toolCallID: string, val: { title?: string; metadata?: Record<string, any> }) => void
   readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
 }
 
@@ -67,6 +68,7 @@ type ToolCall = {
 
 interface ProcessorContext extends Input {
   toolcalls: Record<string, ToolCall>
+  toolMetadata: Record<string, { title?: string; metadata?: Record<string, any> }>
   shouldBreak: boolean
   snapshot: string | undefined
   blocked: boolean
@@ -106,6 +108,7 @@ const layer = Layer.effect(
         sessionID: input.sessionID,
         model: input.model,
         toolcalls: {},
+        toolMetadata: {},
         shouldBreak: false,
         snapshot: initialSnapshot,
         blocked: false,
@@ -169,6 +172,7 @@ const layer = Layer.effect(
       ) {
         const match = yield* readToolCall(toolCallID)
         if (!match || match.part.state.status !== "running") return
+        delete ctx.toolMetadata[toolCallID]
         yield* session.updatePart({
           ...match.part,
           state: {
@@ -185,6 +189,7 @@ const layer = Layer.effect(
       })
 
       const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
+        delete ctx.toolMetadata[toolCallID]
         const match = yield* readToolCall(toolCallID)
         if (!match || match.part.state.status !== "running") return false
         yield* session.updatePart({
@@ -335,6 +340,8 @@ const layer = Layer.effect(
             }
             yield* ensureToolCall(value)
             const input = isRecord(value.input) ? value.input : { value: value.input }
+            const pending = ctx.toolMetadata[value.id]
+            delete ctx.toolMetadata[value.id]
             yield* updateToolCall(value.id, (match) => ({
               ...match,
               tool: value.name,
@@ -345,6 +352,8 @@ const layer = Layer.effect(
                       status: "running",
                       input,
                       time: { start: Date.now() },
+                      title: pending?.title,
+                      metadata: pending?.metadata,
                     },
               metadata: match.metadata?.providerExecuted
                 ? { ...value.providerMetadata, providerExecuted: true }
@@ -593,6 +602,7 @@ const layer = Layer.effect(
           })
         }
         ctx.toolcalls = {}
+        ctx.toolMetadata = {}
         ctx.assistantMessage.time.completed = Date.now()
         yield* session.updateMessage(ctx.assistantMessage)
       })
@@ -690,6 +700,9 @@ const layer = Layer.effect(
         },
         updateToolCall,
         completeToolCall,
+        setToolMetadata(toolCallID, val) {
+          ctx.toolMetadata[toolCallID] = val
+        },
         process,
       } satisfies Handle
     })

@@ -1458,7 +1458,9 @@ const layer = Layer.effect(
       }
       const isSubtask = (agent.mode === "subagent" && cmd.subtask !== false) || cmd.subtask === true
       const currentSession = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-      const trustedOrchestraCommand = input.command === "orchestra" && cmd.agent === "orchestra"
+      const trustedOrchestraCommand =
+        (input.command === "orchestra" && cmd.agent === "orchestra") ||
+        (input.command === "orchestra-custom" && cmd.agent === "orchestra-custom")
       const selectionError = Delegation.selectionError(currentSession, agent.name, false, trustedOrchestraCommand)
       if (!isSubtask && selectionError) throw new Error(selectionError)
 

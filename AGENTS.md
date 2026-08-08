@@ -144,6 +144,16 @@ const table = sqliteTable("session", {
 - Test actual implementation, do not duplicate logic into tests
 - Tests cannot run from repo root (guard: `do-not-run-tests-from-root`); run from package dirs like `packages/opencode`.
 
+## Orchestra
+
+- Keep `orchestra-assistant-specialist` as a private, read-only advisory sibling delegated only by the Orchestra Lead. Core implementer, reviewer, and tester roles must not delegate to it or treat its output as a quality-gate verdict.
+- Scope blocked implementer recovery attempts to the parent assistant message, not the Session. A new user message in the same Session starts a fresh budget, and late results from an older turn must not reset or increment the active turn.
+
+## Research
+
+- Keep `research-methodologist`, `research-scout`, `research-analyst`, `research-critic`, `research-writer`, `research-reviewer`, and `research-editor` as private subagents delegated only by the primary `research` agent. They may use configured MCP and OpenCode tools and edit any relevant workspace file, but must not delegate further or run as primary session agents.
+- Keep Research workflow policy in agent and command definitions rather than hard-coding academic methods into runtime. Runtime owns only privacy, provenance, and delegation boundaries.
+
 ## Type Checking
 
 - Always run `bun typecheck` from package directories (e.g., `packages/opencode`), never `tsc` directly.
