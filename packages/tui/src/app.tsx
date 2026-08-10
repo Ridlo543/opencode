@@ -46,6 +46,7 @@ import { DialogStatus } from "./component/dialog-status"
 import { DialogDebug } from "./component/dialog-debug"
 import { DialogThemeList } from "./component/dialog-theme-list"
 import { DialogHelp } from "./ui/dialog-help"
+import { DialogPrompt } from "./ui/dialog-prompt"
 import { DialogAgent } from "./component/dialog-agent"
 import { DialogSessionList } from "./component/dialog-session-list"
 import { DialogWorkspaceList } from "./component/dialog-workspace-list"
@@ -590,6 +591,44 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
             type: "home",
           })
           dialog.clear()
+        },
+      },
+      {
+        name: "session.new_directory",
+        title: "New session in directory",
+        suggested: true,
+        category: "Session",
+        slashName: "new-dir",
+        slashAliases: ["newdir"],
+        run: async () => {
+          const directory = await DialogPrompt.show(dialog, "New session in directory", {
+            value: project.instance.directory() || sdk.directory,
+            placeholder: "C:\\path\\to\\project",
+          })
+          const next = directory?.trim()
+          if (!next) return
+          const previousDirectory = sdk.directory || project.instance.directory()
+          const previousWorkspace = project.workspace.current()
+
+          try {
+            await sdk.client.path.get({ directory: next }, { throwOnError: true })
+            sdk.setDirectory(next)
+            project.workspace.set(undefined)
+            await sync.bootstrap({ fatal: false })
+            route.navigate({ type: "home" })
+            dialog.clear()
+          } catch (error) {
+            if (previousDirectory && sdk.directory !== previousDirectory) {
+              sdk.setDirectory(previousDirectory)
+              project.workspace.set(previousWorkspace)
+              await sync.bootstrap({ fatal: false }).catch(() => undefined)
+            }
+            toast.show({
+              title: "Failed to switch directory",
+              message: errorMessage(error),
+              variant: "error",
+            })
+          }
         },
       },
       {
