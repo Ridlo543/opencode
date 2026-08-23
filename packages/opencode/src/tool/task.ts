@@ -497,8 +497,17 @@ export const TaskTool = Tool.define(
           parts,
         })
         if (result.info.role === "assistant" && result.info.error) {
-          const message = "message" in result.info.error.data ? result.info.error.data.message : undefined
-          return yield* Effect.fail(new Error(typeof message === "string" ? message : "Subagent failed"))
+          const message =
+            "message" in result.info.error.data && typeof result.info.error.data.message === "string"
+              ? result.info.error.data.message
+              : result.info.error.name
+          return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${message}`))
+        }
+
+        const failed = result.parts.findLast((item) => item.type === "tool" && item.state.status === "error")
+        if (failed?.type === "tool" && failed.state.status === "error") {
+          return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${failed.state.error}`))
+        }
         }
         // Providers can split a specialist's final response across multiple
         // text parts around tool calls. Validate the complete text transcript,
