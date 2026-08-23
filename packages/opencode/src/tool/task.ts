@@ -457,12 +457,17 @@ export const TaskTool = Tool.define(
         ...(runInBackground ? { background: true } : {}),
       }
 
+      // [CUSTOM] Variant precedence: an explicit model override has no variant;
+      // a specialist with its own configured model keeps that agent's configured
+      // variant; inheriting the parent model keeps the parent's variant.
+      const childVariant = modelOverride ? undefined : agentModel ? (next.variant ?? undefined) : variant
+
       const workflowEntry = {
         taskID: nextSession.id,
         role: next.name,
         requestedModel: params.model,
         resolvedModel: `${model.providerID}/${model.modelID}`,
-        variant: (modelOverride || agentModel) ? undefined : variant,
+        variant: childVariant,
         startedAt: Date.now(),
       } satisfies OrchestraWorkflowEntry
       if (isOrchestraLead(parent.agent ?? ctx.agent)) {
@@ -487,7 +492,7 @@ export const TaskTool = Tool.define(
             providerID: model.providerID,
           },
           // [CUSTOM] Discard variant when model override is set
-          variant: (modelOverride || agentModel) ? undefined : variant,
+          variant: childVariant,
           agent: next.name,
           parts,
         })
@@ -515,7 +520,7 @@ export const TaskTool = Tool.define(
               modelID: model.modelID,
               providerID: model.providerID,
             },
-            variant: (modelOverride || agentModel) ? undefined : variant,
+            childVariant,
             agent: next.name,
             tools: { "*": false },
             parts: [
@@ -693,8 +698,16 @@ export const TaskTool = Tool.define(
               background.waitForPromotion(nextSession.id),
             )
             if (result?.metadata?.background === true) return backgroundResult()
-            if (result?.status === "error") return yield* Effect.fail(new Error(result.error ?? "Task failed"))
-            if (result?.status === "cancelled") return yield* Effect.fail(new Error("Task cancelled"))
+            if (result?.status === "error")
+              return yield* Effect.fail(
+                new Error(renderOutput({ sessionID: nextSession.id, state: "error", text: result.error ?? "Task failed" })),
+              )
+            if (result?.status === "cancelled")
+              return yield* Effect.fail(
+                new Error(
+                  renderOutput({ sessionID: nextSession.id, state: "error", text: "Task was cancelled/aborted" }),
+                ),
+              )
             return {
               title: params.description,
               metadata,

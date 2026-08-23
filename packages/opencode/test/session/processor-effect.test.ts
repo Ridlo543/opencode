@@ -711,9 +711,13 @@ it.live("session.processor effect tests stop child sessions after bounded retrie
       Effect.gen(function* () {
         const { processors, session, provider } = yield* boot()
 
-        yield* llm.error(503, { error: "boom" })
-        yield* llm.error(503, { error: "boom" })
-        yield* llm.error(503, { error: "boom" })
+        yield* Effect.forEach(Array.from({ length: 7 }), () =>
+          llm.error(
+            503,
+            { error: "Our servers are currently overloaded." },
+            { "retry-after-ms": "0" },
+          ),
+        )
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "retry subagent")
@@ -744,7 +748,7 @@ it.live("session.processor effect tests stop child sessions after bounded retrie
         })
 
         expect(value).toBe("stop")
-        expect(yield* llm.calls).toBe(3)
+        expect(yield* llm.calls).toBe(7)
         expect(handle.message.error?.name).toBe("APIError")
       }),
     { config: (url) => providerCfg(url) },

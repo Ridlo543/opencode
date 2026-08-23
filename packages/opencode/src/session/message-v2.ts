@@ -392,6 +392,19 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         }
       }
       if (assistantMessage.parts.length > 0) {
+        // A turn that produced only reasoning (no text, no tool calls) is a
+        // dead partial generation from a failed/aborted request. Google's API
+        // rejects requests carrying such empty model turns with 400 "Request
+        // contains an invalid argument." Drop them unless they carry signed
+        // Anthropic thinking that must stay in the chain.
+        const hasRealContent = assistantMessage.parts.some((part) => {
+          if (part.type === "text") return part.text !== ""
+          if (part.type === "reasoning" || part.type === "step-start") return false
+          return true
+        })
+        if (!hasRealContent && !hasSignedReasoning) {
+          continue
+        }
         result.push(assistantMessage)
         // Inject pending media as a user message for providers that don't support
         // media (images, PDFs) in tool results
@@ -419,7 +432,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 
   const tools = Object.fromEntries(Array.from(toolNames).map((toolName) => [toolName, { toModelOutput }]))
 
-  return yield* Effect.promise(() =>
+  const messages = yield* Effect.promise(() =>
     convertToModelMessages(
       result.filter((msg) => msg.parts.some((part) => part.type !== "step-start")),
       {
@@ -428,6 +441,34 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
       },
     ),
   )
+  // A trailing user message whose text parts are all ignored/synthetic (e.g.
+  // a plugin continuation trigger) is dropped above, which would leave the
+  // request ending on an assistant turn. Providers reject that with 400
+  // "Requests ending with a model turn are not supported." Restore the user
+  // turn only in that case; assistant-ending conversations are untouched.
+  const lastInput = input.at(-1)
+  if (messages.length > 0 && lastInput?.info.role === "user" && messages.at(-1)?.role !== "user") {
+    messages.push({ role: "user", content: "Please continue." })
+  }
+
+  // Failed assistant turns (no parts) are dropped above, which can leave two
+  // real user messages adjacent. Providers (e.g. Google Gemini) reject
+  // requests with consecutive user turns with 400 "Request contains an
+  // invalid argument." Merge adjacent user turns instead.
+  const merged: ModelMessage[] = []
+  for (const msg of messages) {
+    const prev = merged.at(-1)
+    if (prev?.role === "user" && msg.role === "user") {
+      const prevText =
+        typeof prev.content === "string" ? (prev.content ? [{ type: "text" as const, text: prev.content }] : []) : prev.content
+      const curText =
+        typeof msg.content === "string" ? (msg.content ? [{ type: "text" as const, text: msg.content }] : []) : msg.content
+      prev.content = [...prevText, ...curText]
+    } else {
+      merged.push({ ...msg })
+    }
+  }
+  return merged
 })
 
 export function toModelMessages(

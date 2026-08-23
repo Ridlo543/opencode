@@ -578,8 +578,10 @@ describe("ProviderTransform.options - gpt-5 textVerbosity", () => {
         } as any,
         flags: { outputTokenMax: 32_000, client: "test" } as any,
         isWorkflow: false,
+        eventID: "evt_test-correlation",
       }),
     )
+    expect(result.headers["x-context-event-id"]).toBe("evt_test-correlation")
     expect(result.params.options.reasoningEffort).toBe("high")
     expect(result.params.options.reasoningSummary).toBeUndefined()
     expect(result.params.options.include).toBeUndefined()

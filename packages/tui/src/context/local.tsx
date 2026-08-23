@@ -331,6 +331,13 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             if (!a) return
             setModelStore("model", a.name, model)
             if (options?.recent) {
+              // An explicit model pick is the session model. Drop stale
+              // per-agent overrides synced from older messages so switching
+              // agents uses the freshly selected model instead of a
+              // remembered one.
+              for (const name of Object.keys(modelStore.model)) {
+                if (name !== a.name) setModelStore("model", name, undefined as unknown as { providerID: string; modelID: string })
+              }
               setModelStore("recent", recentModels(model, modelStore.recent))
               save()
             }

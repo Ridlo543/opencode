@@ -654,7 +654,30 @@ const layer = Layer.effect(
       delegated = false,
       workflowTransition = false,
     ) {
-      const agentName = input.agent
+      const current = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      let agentName = input.agent
+      if (agentName) {
+        // Internal agents (hidden, primary) such as "compaction" only apply to
+        // the internal flow that created them. A plugin continuation trigger
+        // may inherit such a label from an earlier internal message; running a
+        // normal prompt under it would use the internal system prompt and
+        // leave the session looping with no real role. Resolve to the last
+        // real user agent instead.
+        const candidate = yield* agents.get(agentName).pipe(Effect.option)
+        if (Option.isSome(candidate) && candidate.value && candidate.value.hidden === true && candidate.value.mode !== "subagent") {
+          const recent = yield* sessions.messages({ sessionID: input.sessionID, limit: 50 }).pipe(Effect.orDie)
+          for (let i = recent.length - 1; i >= 0; i--) {
+            const m = recent[i]
+            if (m.info.role !== "user" || !m.info.agent) continue
+            const resolved = yield* agents.get(m.info.agent).pipe(Effect.option)
+            if (Option.isSome(resolved) && resolved.value && !(resolved.value.hidden === true && resolved.value.mode !== "subagent")) {
+              agentName = m.info.agent
+              break
+            }
+          }
+          if (agentName === input.agent) agentName = yield* agents.defaultAgent()
+        }
+      }
       const ag = agentName ? yield* agents.get(agentName) : yield* agents.defaultInfo()
       if (!ag) {
         const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
@@ -663,7 +686,6 @@ const layer = Layer.effect(
         yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
         throw error
       }
-      const current = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       const selectionError = Delegation.selectionError(current, ag.name, delegated, workflowTransition)
       if (selectionError) throw new Error(selectionError)
 
@@ -1136,10 +1158,23 @@ const layer = Layer.effect(
               (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
             ) ?? false
 
+          // Thinking-only turns: with high reasoning effort models (e.g. Gemini 3.7 Flash High),
+          // a stream turn may exhaust reasoning budget without producing visible text or tool calls
+          // while returning finish="stop". The model intended to continue work. Do not exit the loop
+          // if the assistant turn has only reasoning parts.
+          const hasReasoningOnly = Boolean(
+            lastAssistantMsg &&
+              lastAssistantMsg.parts.length > 0 &&
+              lastAssistantMsg.parts.every(
+                (part) => part.type === "reasoning" || part.type === "step-start" || part.type === "step-finish",
+              ),
+          )
+
           if (
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
+            !hasReasoningOnly &&
             lastAssistant.parentID === lastUser.id
           ) {
             const orphan = lastAssistantMsg?.parts.find(

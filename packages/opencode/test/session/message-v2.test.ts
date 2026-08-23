@@ -177,6 +177,121 @@ describe("session.message-v2.toModelMessage", () => {
     expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([])
   })
 
+  test("never ends the request on an assistant turn when the last user message has only ignored parts", async () => {
+    // A plugin continuation trigger is a synthetic user message whose only text
+    // part is ignored. Once dropped, the request would end on the previous
+    // assistant turn, which providers reject with 400 "Requests ending with a
+    // model turn are not supported."
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo("m-user"),
+        parts: [
+          {
+            ...basePart("m-user", "p1"),
+            type: "text",
+            text: "hello",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo("m-assistant", "m-user"),
+        parts: [
+          {
+            ...basePart("m-assistant", "a1"),
+            type: "text",
+            text: "assistant reply",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: userInfo("m-trigger"),
+        parts: [
+          {
+            ...basePart("m-trigger", "p1"),
+            type: "text",
+            text: "trigger",
+            ignored: true,
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const messages = await MessageV2.toModelMessages(input, model)
+    expect(messages.length).toBeGreaterThan(0)
+    expect(messages.at(-1)?.role).toBe("user")
+  })
+
+  test("merges consecutive user turns left by a failed assistant turn", async () => {
+    // A failed assistant turn (no parts) is dropped, which can leave two real
+    // user messages adjacent. Providers (e.g. Google Gemini) reject requests
+    // with consecutive user turns with 400 "Request contains an invalid
+    // argument."
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo("m-user1"),
+        parts: [
+          {
+            ...basePart("m-user1", "p1"),
+            type: "text",
+            text: "hello",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo("m-failed", "m-user1"),
+        parts: [],
+      },
+      {
+        info: userInfo("m-user2"),
+        parts: [
+          {
+            ...basePart("m-user2", "p1"),
+            type: "text",
+            text: "continue",
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const messages = await MessageV2.toModelMessages(input, model)
+    const users = messages.filter((m) => m.role === "user")
+    expect(users.length).toBe(1)
+    expect(messages.at(-1)?.role).toBe("user")
+  })
+
+  test("drops reasoning-only assistant turns from a failed generation", async () => {
+    // A failed request can leave an assistant turn with only reasoning parts.
+    // The converted request would carry an empty model turn, which providers
+    // (e.g. Google Gemini) reject with 400 "Request contains an invalid
+    // argument."
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo("m-user"),
+        parts: [
+          {
+            ...basePart("m-user", "p1"),
+            type: "text",
+            text: "hello",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo("m-failed", "m-user"),
+        parts: [
+          {
+            ...basePart("m-failed", "r1"),
+            type: "reasoning",
+            text: "thinking about the task",
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const messages = await MessageV2.toModelMessages(input, model)
+    expect(messages.some((m) => m.role === "assistant")).toBe(false)
+    expect(messages.at(-1)?.role).toBe("user")
+  })
+
   test("filters empty user text parts while keeping non-empty parts", async () => {
     const messageID = "m-user"
 

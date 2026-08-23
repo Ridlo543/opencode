@@ -33,6 +33,7 @@ type PrepareInput = {
   readonly plugin: Plugin.Interface
   readonly flags: RuntimeFlags.Info
   readonly isWorkflow: boolean
+  readonly eventID?: string
 }
 
 export type Prepared = {
@@ -201,6 +202,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
           }),
       ...input.model.headers,
       ...headers,
+      ...(input.eventID ? { "x-context-event-id": input.eventID } : {}),
+      ...(process.env.CAPTURE_RUN_ID ? { "x-context-run-id": process.env.CAPTURE_RUN_ID } : {}),
     },
   }
 })

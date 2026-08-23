@@ -44,6 +44,8 @@ export type StreamInput = {
   tools: Record<string, Tool>
   retries?: number
   toolChoice?: "auto" | "required" | "none"
+  /** Correlates this model request with provider telemetry and runtime traces. */
+  eventID?: string
 }
 
 export type StreamRequest = StreamInput & {
@@ -109,6 +111,7 @@ const live: Layer.Layer<
         plugin,
         flags,
         isWorkflow,
+        eventID: input.eventID,
       })
 
       // Wire up toolExecutor for DWS workflow models so that tool calls

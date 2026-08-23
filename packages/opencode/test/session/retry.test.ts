@@ -184,6 +184,7 @@ describe("session.retry.retryable", () => {
     "response timed out",
     "Please retry your request",
     "try your request again",
+    "Our servers are currently overloaded.",
     "upstream returned status 524",
   ])("retries matching API error text: %s", (message) => {
     expect(SessionRetry.retryable(wrap(message), retryProvider)).toEqual({ message })

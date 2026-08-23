@@ -27,7 +27,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
-const SUBAGENT_RETRY_LIMIT = 2
+const SUBAGENT_RETRY_LIMIT = 6
 export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
@@ -636,6 +636,9 @@ const layer = Layer.effect(
       })
 
       const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
+        const eventID = ctx.assistantMessage.eventID ?? streamInput.eventID ?? `evt_${crypto.randomUUID()}`
+        ctx.assistantMessage.eventID = eventID
+        streamInput = { ...streamInput, eventID }
         yield* Effect.logInfo("process", {
           "session.id": input.sessionID,
           messageID: input.assistantMessage.id,
