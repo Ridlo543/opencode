@@ -53,16 +53,6 @@ export function win32FlushInputBuffer() {
   k32!.symbols.FlushConsoleInputBuffer(handle)
 }
 
-/**
- * Hard reset terminal state on exit/crash (disable mouse tracking, restore cursor).
- */
-export function resetTerminal() {
-  try {
-    process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[!p")
-  } catch {}
-  win32FlushInputBuffer()
-}
-
 let unhook: (() => void) | undefined
 
 /**
