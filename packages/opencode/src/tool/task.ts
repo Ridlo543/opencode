@@ -528,7 +528,7 @@ export const TaskTool = Tool.define(
               modelID: model.modelID,
               providerID: model.providerID,
             },
-            childVariant,
+            variant: childVariant,
             agent: next.name,
             tools: { "*": false },
             parts: [

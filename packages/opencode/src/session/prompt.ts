@@ -217,7 +217,7 @@ const layer = Layer.effect(
       const ag = yield* agents.get("title")
       if (!ag) return
       const cfg = yield* config.get()
-      const configuredSmall = cfg.small_model ? parseModel(cfg.small_model) : undefined
+      const configuredSmall = cfg.small_model ? Provider.parseModel(cfg.small_model) : undefined
       const mdl = ag.model
         ? yield* provider.getModel(ag.model.providerID, ag.model.modelID)
         : configuredSmall
