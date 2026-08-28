@@ -703,37 +703,40 @@ export function Prompt(props: PromptProps) {
   }
 
   function syncExtmarksWithPromptParts() {
-    const allExtmarks = input.extmarks.getAllForTypeId(promptPartTypeId)
-    setStore(
-      produce((draft) => {
-        const newMap = new Map<number, number>()
-        const newParts: typeof draft.prompt.parts = []
+    if (!input || input.isDestroyed || !input.extmarks) return
+    try {
+      const allExtmarks = input.extmarks.getAllForTypeId(promptPartTypeId)
+      setStore(
+        produce((draft) => {
+          const newMap = new Map<number, number>()
+          const newParts: typeof draft.prompt.parts = []
 
-        for (const extmark of allExtmarks) {
-          const partIndex = draft.extmarkToPartIndex.get(extmark.id)
-          if (partIndex !== undefined) {
-            const part = draft.prompt.parts[partIndex]
-            if (part) {
-              if (part.type === "agent" && part.source) {
-                part.source.start = extmark.start
-                part.source.end = extmark.end
-              } else if (part.type === "file" && part.source?.text) {
-                part.source.text.start = extmark.start
-                part.source.text.end = extmark.end
-              } else if (part.type === "text" && part.source?.text) {
-                part.source.text.start = extmark.start
-                part.source.text.end = extmark.end
+          for (const extmark of allExtmarks) {
+            const partIndex = draft.extmarkToPartIndex.get(extmark.id)
+            if (partIndex !== undefined) {
+              const part = draft.prompt.parts[partIndex]
+              if (part) {
+                if (part.type === "agent" && part.source) {
+                  part.source.start = extmark.start
+                  part.source.end = extmark.end
+                } else if (part.type === "file" && part.source?.text) {
+                  part.source.text.start = extmark.start
+                  part.source.text.end = extmark.end
+                } else if (part.type === "text" && part.source?.text) {
+                  part.source.text.start = extmark.start
+                  part.source.text.end = extmark.end
+                }
+                newMap.set(extmark.id, newParts.length)
+                newParts.push(part)
               }
-              newMap.set(extmark.id, newParts.length)
-              newParts.push(part)
             }
           }
-        }
 
-        draft.extmarkToPartIndex = newMap
-        draft.prompt.parts = newParts
-      }),
-    )
+          draft.extmarkToPartIndex = newMap
+          draft.prompt.parts = newParts
+        }),
+      )
+    } catch {}
   }
 
   const stashCommands = createMemo(() =>

@@ -84,7 +84,7 @@ import type { EventSource } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
 import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
-import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
+import { resetTerminal, win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 
@@ -230,9 +230,39 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
       yield* Effect.addFinalizer(() => Effect.sync(TuiAudio.dispose))
       const shutdown = yield* Deferred.make<unknown>()
       const onSighup = () => destroyRenderer(renderer)
+      const onSigint = () => {
+        destroyRenderer(renderer)
+        process.exit(130)
+      }
+      const onSigterm = () => {
+        destroyRenderer(renderer)
+        process.exit(143)
+      }
+      const onExit = () => {
+        resetTerminal()
+      }
+      const onCrash = (err: unknown) => {
+        resetTerminal()
+        console.error("TUI Process Crashed:", err)
+      }
       yield* Effect.acquireRelease(
-        Effect.sync(() => process.on("SIGHUP", onSighup)),
-        () => Effect.sync(() => process.off("SIGHUP", onSighup)),
+        Effect.sync(() => {
+          process.on("SIGHUP", onSighup)
+          process.on("SIGINT", onSigint)
+          process.on("SIGTERM", onSigterm)
+          process.on("exit", onExit)
+          process.on("uncaughtException", onCrash)
+          process.on("unhandledRejection", onCrash)
+        }),
+        () =>
+          Effect.sync(() => {
+            process.off("SIGHUP", onSighup)
+            process.off("SIGINT", onSigint)
+            process.off("SIGTERM", onSigterm)
+            process.off("exit", onExit)
+            process.off("uncaughtException", onCrash)
+            process.off("unhandledRejection", onCrash)
+          }),
       )
       renderer.once("destroy", () => Deferred.doneUnsafe(shutdown, Effect.void))
       const pluginRuntime = createPluginRuntime()
