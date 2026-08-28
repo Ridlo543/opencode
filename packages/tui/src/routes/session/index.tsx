@@ -2227,7 +2227,10 @@ function Task(props: ToolProps) {
 
   onMount(() => {
     const sessionID = stringValue(props.metadata.sessionId) ?? stringValue(props.metadata.sessionID)
-    if (sessionID && !sync.data.message[sessionID]?.length) void sync.session.sync(sessionID)
+    // Only eagerly sync subagent history if the task is actively running
+    if (sessionID && props.part.state.status === "running" && !sync.data.message[sessionID]?.length) {
+      void sync.session.sync(sessionID)
+    }
   })
 
   const sessionID = createMemo(() => stringValue(props.metadata.sessionId) ?? stringValue(props.metadata.sessionID))
