@@ -252,6 +252,10 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
               otherCode: other.code,
               otherStderr: other.stderr,
             })
+            // If index is corrupt (e.g. bad signature 0x00000000), wipe the corrupt index file so it can recover
+            if (diff.stderr.includes("index file corrupt") || other.stderr.includes("index file corrupt")) {
+              yield* fs.remove(path.join(state.gitdir, "index")).pipe(Effect.catch(() => Effect.void))
+            }
             return
           }
 
