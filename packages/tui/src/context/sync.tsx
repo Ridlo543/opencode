@@ -376,6 +376,11 @@ export const {
         }
         case "message.part.updated": {
           touchPart(event.properties.part.sessionID, event.properties.part.id)
+          const sessionMessages = store.message[event.properties.part.sessionID]
+          // If the message is no longer in the visible window, do not accumulate parts in memory
+          if (sessionMessages && !sessionMessages.some((m) => m.id === event.properties.part.messageID)) {
+            break
+          }
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
             setStore("part", event.properties.part.messageID, [event.properties.part])
