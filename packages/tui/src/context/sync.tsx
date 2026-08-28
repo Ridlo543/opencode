@@ -339,7 +339,7 @@ export const {
             }),
           )
           const updated = store.message[event.properties.info.sessionID]
-          if (updated.length > 50) {
+          if (updated.length > 100) {
             const oldest = updated[0]
             batch(() => {
               setStore(
@@ -376,11 +376,6 @@ export const {
         }
         case "message.part.updated": {
           touchPart(event.properties.part.sessionID, event.properties.part.id)
-          const sessionMessages = store.message[event.properties.part.sessionID]
-          // If the message is no longer in the visible window, do not accumulate parts in memory
-          if (sessionMessages && !sessionMessages.some((m) => m.id === event.properties.part.messageID)) {
-            break
-          }
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
             setStore("part", event.properties.part.messageID, [event.properties.part])
@@ -628,8 +623,8 @@ export const {
                   ),
                 )
                 infos.sort(compareMessage)
-                const removed = infos.slice(0, -50)
-                const visible = infos.slice(-50)
+                const removed = infos.slice(0, -100)
+                const visible = infos.slice(-100)
                 const visibleIDs = new Set(visible.map((message) => message.id))
                 for (const message of messages.data ?? []) {
                   if (!visibleIDs.has(message.info.id)) {
