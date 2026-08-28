@@ -508,7 +508,6 @@ export const TaskTool = Tool.define(
         if (failed?.type === "tool" && failed.state.status === "error") {
           return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${failed.state.error}`))
         }
-        }
         // Providers can split a specialist's final response across multiple
         // text parts around tool calls. Validate the complete text transcript,
         // not only the last fragment.
@@ -707,16 +706,8 @@ export const TaskTool = Tool.define(
               background.waitForPromotion(nextSession.id),
             )
             if (result?.metadata?.background === true) return backgroundResult()
-            if (result?.status === "error")
-              return yield* Effect.fail(
-                new Error(renderOutput({ sessionID: nextSession.id, state: "error", text: result.error ?? "Task failed" })),
-              )
-            if (result?.status === "cancelled")
-              return yield* Effect.fail(
-                new Error(
-                  renderOutput({ sessionID: nextSession.id, state: "error", text: "Task was cancelled/aborted" }),
-                ),
-              )
+            if (result?.status === "error") return yield* Effect.fail(new Error(result.error ?? "Task failed"))
+            if (result?.status === "cancelled") return yield* Effect.fail(new Error("Task cancelled"))
             return {
               title: params.description,
               metadata,

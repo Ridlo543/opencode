@@ -212,7 +212,7 @@ export const make = (dependencies: Dependencies) => {
       .stream(
         LLM.request({
           model: input.model,
-          input.request.http,
+          http: input.request.http,
           system: PROMPT_COMPACTION,
           messages: [Message.user(summaryPrompt)],
           tools: [],

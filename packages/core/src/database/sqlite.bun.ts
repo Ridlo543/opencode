@@ -162,6 +162,8 @@ const nativeLayer = (config: Config) =>
       })
       yield* Effect.addFinalizer(() => Effect.sync(() => native.close()))
       if (config.disableWAL !== true) native.run("PRAGMA journal_mode = WAL;")
+      native.run("PRAGMA cache_size = -64000;") // 64MB cache limit
+      native.run("PRAGMA mmap_size = 268435456;") // 256MB mmap limit
       return native
     }),
   )

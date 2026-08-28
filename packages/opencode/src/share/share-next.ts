@@ -346,7 +346,15 @@ const layer = Layer.effect(
         return
       }
 
-      const req = yield* request()
+      const current = yield* request()
+      // [CUSTOM] Pick the backend that owns this share. A share created while
+      // logged out lives on the legacy endpoint (url contains "/share/");
+      // deleting it via the console API (or vice versa) fails and leaves the
+      // link alive. Infer the target from the stored share URL.
+      const legacyBase = (yield* cfg.get()).enterprise?.url ?? "https://opncd.ai"
+      const req = share.url.startsWith(`${legacyBase}/share/`)
+        ? { headers: {} as Record<string, string>, api: legacyApi, baseUrl: legacyBase }
+        : current
       yield* HttpClientRequest.delete(`${req.baseUrl}${req.api.remove(share.id)}`).pipe(
         HttpClientRequest.setHeaders(req.headers),
         HttpClientRequest.bodyJson({ secret: share.secret }),

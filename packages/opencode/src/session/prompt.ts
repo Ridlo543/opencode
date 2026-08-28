@@ -216,10 +216,20 @@ const layer = Layer.effect(
 
       const ag = yield* agents.get("title")
       if (!ag) return
+      const cfg = yield* config.get()
+      const configuredSmall = cfg.small_model ? parseModel(cfg.small_model) : undefined
       const mdl = ag.model
         ? yield* provider.getModel(ag.model.providerID, ag.model.modelID)
-        : ((yield* provider.getSmallModel(input.providerID)) ??
-          (yield* provider.getModel(input.providerID, input.modelID)))
+        : configuredSmall
+          ? yield* provider.getModel(configuredSmall.providerID, configuredSmall.modelID).pipe(
+              Effect.catchTag("ProviderModelNotFoundError", () =>
+                provider.getSmallModel(input.providerID).pipe(
+                  Effect.flatMap((m) => m ? Effect.succeed(m) : provider.getModel(input.providerID, input.modelID))
+                )
+              )
+            )
+          : ((yield* provider.getSmallModel(input.providerID)) ??
+            (yield* provider.getModel(input.providerID, input.modelID)))
       const msgs = onlySubtasks
         ? [{ role: "user" as const, content: subtasks.map((p) => p.prompt).join("\n") }]
         : yield* MessageV2.toModelMessagesEffect(context, mdl)

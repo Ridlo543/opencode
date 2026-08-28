@@ -220,8 +220,8 @@ describe("session.retry.retryable", () => {
     "try your request again",
     "servers currently overloaded.",
     "Please try again in a few minutes",
-    "The model is currently at capacity due to demand",
-    "Service is temporarily at capacity",
+    "The model is currently at capacity due to high demand",
+    "The service is temporarily at capacity",
     "upstream returned status 524",
   ])("retries matching API error text: %s", (message) => {
     expect(SessionRetry.retryable(wrap(message), retryProvider)).toEqual({ message })

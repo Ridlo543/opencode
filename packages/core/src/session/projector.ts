@@ -234,7 +234,14 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionV1.Event.Updated, (event) =>
       db
         .update(SessionTable)
-        .set(sessionRow(event.data.info))
+        // [CUSTOM] sessionRow leaves share_url untouched when info.share is
+        // absent (drizzle skips undefined), which kept stale links visible
+        // after unshare. An Updated event carries a full snapshot, so absence
+        // of share genuinely means "not shared" - clear the column.
+        .set({
+          ...sessionRow(event.data.info),
+          ...(event.data.info.share ? {} : { share_url: null }),
+        })
         .where(eq(SessionTable.id, event.data.sessionID))
         .run()
         .pipe(Effect.orDie),

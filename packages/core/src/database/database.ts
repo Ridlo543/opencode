@@ -32,6 +32,18 @@ const layer = Layer.effect(
     yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
     yield* DatabaseMigration.apply(db)
 
+    // [CUSTOM] Auto-prune transient event stream log entries on startup
+    // Retain the latest 10,000 sequence events per aggregate to prevent unbounded DB growth
+    yield* db.run(`
+      DELETE FROM event 
+      WHERE aggregate_id IN (SELECT aggregate_id FROM event_sequence)
+      AND seq < (
+        SELECT es.seq - 10000 
+        FROM event_sequence es 
+        WHERE es.aggregate_id = event.aggregate_id
+      )
+    `).pipe(Effect.catchCause(() => Effect.void))
+
     return { db }
   }).pipe(Effect.orDie),
 )

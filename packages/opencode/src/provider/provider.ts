@@ -1461,6 +1461,50 @@ export function fromModelsDevProvider(provider: ModelsDev.Provider): Info {
   }
 }
 
+function isLikelyVisionModel(id: string): boolean {
+  const m = id.toLowerCase()
+  return (
+    m.includes("gpt-5") ||
+    m.includes("gpt-4o") ||
+    m.includes("gpt-4.5") ||
+    m.includes("claude") ||
+    m.includes("gemini") ||
+    m.includes("grok") ||
+    m.includes("vision") ||
+    m.includes("image") ||
+    m.includes("-vl") ||
+    m.includes("pixtral") ||
+    m.includes("qwen") && (m.includes("vl") || m.includes("plus") || m.includes("max") || m.includes("omni")) ||
+    m.includes("glm") && (m.includes("v") || m.includes("image")) ||
+    m.includes("kimi") ||
+    m.includes("minimax") ||
+    m.includes("mimo") ||
+    m.includes("internvl") ||
+    m.includes("llava")
+  )
+}
+
+function isLikelyPdfModel(id: string): boolean {
+  const m = id.toLowerCase()
+  return m.includes("claude") || m.includes("gemini") || m.includes("gpt-5") || m.includes("gpt-4") || m.includes("pdf")
+}
+
+function isLikelyReasoningModel(id: string): boolean {
+  const m = id.toLowerCase()
+  return (
+    m.includes("r1") ||
+    m.includes("reasoning") ||
+    m.includes("reasoner") ||
+    m.includes("thinking") ||
+    m.includes("gpt-5") ||
+    m.includes("o1") ||
+    m.includes("o3") ||
+    m.includes("o4") ||
+    m.includes("qwq") ||
+    m.includes("qvq")
+  )
+}
+
 function discoveredModel(input: {
   id: string
   providerID: ProviderV2.ID
@@ -1470,8 +1514,12 @@ function discoveredModel(input: {
   const capabilities = isRecord(input.raw.capabilities) ? input.raw.capabilities : {}
   const context = typeof capabilities.contextWindow === "number" ? capabilities.contextWindow : 0
   const output = typeof capabilities.maxOutput === "number" ? capabilities.maxOutput : 0
-  const vision = capabilities.vision === true
-  const pdf = capabilities.pdf === true
+  const vision =
+    typeof capabilities.vision === "boolean" ? capabilities.vision : isLikelyVisionModel(input.id)
+  const pdf =
+    typeof capabilities.pdf === "boolean" ? capabilities.pdf : isLikelyPdfModel(input.id)
+  const reasoning =
+    typeof capabilities.reasoning === "boolean" ? capabilities.reasoning : isLikelyReasoningModel(input.id)
   const audioInput = capabilities.audioInput === true
   const videoInput = capabilities.videoInput === true
   const imageOutput = capabilities.imageOutput === true
@@ -1493,7 +1541,7 @@ function discoveredModel(input: {
     limit: { context, output },
     capabilities: {
       temperature: false,
-      reasoning: capabilities.reasoning === true,
+      reasoning,
       attachment: vision || pdf || audioInput || videoInput,
       toolcall: capabilities.tools !== false,
       input: { text: true, audio: audioInput, image: vision, video: videoInput, pdf },

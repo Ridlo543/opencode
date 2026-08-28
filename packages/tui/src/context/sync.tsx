@@ -339,7 +339,7 @@ export const {
             }),
           )
           const updated = store.message[event.properties.info.sessionID]
-          if (updated.length > 100) {
+          if (updated.length > 50) {
             const oldest = updated[0]
             batch(() => {
               setStore(
@@ -623,8 +623,8 @@ export const {
                   ),
                 )
                 infos.sort(compareMessage)
-                const removed = infos.slice(0, -100)
-                const visible = infos.slice(-100)
+                const removed = infos.slice(0, -50)
+                const visible = infos.slice(-50)
                 const visibleIDs = new Set(visible.map((message) => message.id))
                 for (const message of messages.data ?? []) {
                   if (!visibleIDs.has(message.info.id)) {
